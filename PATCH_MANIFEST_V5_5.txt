@@ -1,0 +1,32 @@
+MAYABU v5.5 MANUAL PATCH MANIFEST
+
+ADD
+MAYABU_V5_5_MANUAL_UPGRADE_GUIDE.md
+MAYABU_V5_5_REFINEMENT_REPORT.md
+frontend/app/components/comparison/compare-provider.test.tsx
+tests/test_v55_refinement.py
+
+REPLACE
+MAYABU_CURRENT_WORKING_BACKEND_ARCHITECTURE.md
+README.md
+frontend/README.md
+frontend/app/components/comparison/compare-provider.tsx
+frontend/app/hooks/use-verification.ts
+frontend/app/lib/formatting/freshness.test.ts
+frontend/app/lib/formatting/freshness.ts
+frontend/package-lock.json
+frontend/package.json
+mayabu/__init__.py
+mayabu/search/ranker.py
+mayabu_refresh/common.py
+
+MOVE TO docs/history
+MAYABU_V5_4_MANUAL_UPGRADE_GUIDE.md
+MAYABU_V5_4_OPTIMIZATION_REPORT.md
+PATCH_MANIFEST_V5_4.txt
+
+DATABASE MIGRATION
+None.
+
+PUBLIC API CHANGE
+None.

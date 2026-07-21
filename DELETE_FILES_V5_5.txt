@@ -1,0 +1,4 @@
+After copying the v5.5 patch, remove these obsolete root copies only if you did not move them into docs/history:
+MAYABU_V5_4_MANUAL_UPGRADE_GUIDE.md
+MAYABU_V5_4_OPTIMIZATION_REPORT.md
+PATCH_MANIFEST_V5_4.txt

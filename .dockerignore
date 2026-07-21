@@ -1,0 +1,14 @@
+.git
+.venv
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+artifacts/
+logs/
+*.zip
+frontend/
+tests/
+docs/
+*.md

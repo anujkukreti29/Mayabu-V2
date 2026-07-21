@@ -1,0 +1,115 @@
+services:
+  redis:
+    image: redis:7-bookworm
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "192mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 256m
+    cpus: "0.50"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: mayabu
+      POSTGRES_PASSWORD: ${MAYABU_POSTGRES_PASSWORD:-mayabu_dev_password}
+      POSTGRES_DB: mayabu
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - mayabu_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mayabu -d mayabu"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    shm_size: "256mb"
+    mem_limit: 1g
+    cpus: "1.00"
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    profiles: ["app"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://mayabu:${MAYABU_POSTGRES_PASSWORD:-mayabu_dev_password}@postgres:5432/mayabu
+      REDIS_URL: redis://redis:6379/0
+      MAYABU_API_HOST: 0.0.0.0
+      MAYABU_ENV: production
+      MAYABU_API_WORKERS: ${MAYABU_API_WORKERS:-2}
+      MAYABU_API_THREADPOOL_TOKENS: ${MAYABU_API_THREADPOOL_TOKENS:-40}
+      MAYABU_ENABLE_REDIS_CACHE: "true"
+      MAYABU_ENABLE_REDIS_RATE_LIMIT: "true"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 768m
+    cpus: "1.00"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    profiles: ["app", "worker"]
+    command: ["python", "worker_db.py", "--loop", "--concurrency", "2"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://mayabu:${MAYABU_POSTGRES_PASSWORD:-mayabu_dev_password}@postgres:5432/mayabu
+      REDIS_URL: redis://redis:6379/0
+      MAYABU_ENABLE_REDIS_CACHE: "true"
+      MAYABU_ENABLE_REDIS_RATE_LIMIT: "true"
+      MAYABU_SCRAPER_DISTRIBUTED_SLOT_TTL_SECONDS: ${MAYABU_SCRAPER_DISTRIBUTED_SLOT_TTL_SECONDS:-180}
+      MAYABU_SCRAPER_DISTRIBUTED_SLOT_WAIT_SECONDS: ${MAYABU_SCRAPER_DISTRIBUTED_SLOT_WAIT_SECONDS:-5}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    shm_size: "1gb"
+    mem_limit: 1500m
+    cpus: "2.00"
+    restart: unless-stopped
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./logs:/app/logs
+
+  maintenance:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    profiles: ["app", "maintenance"]
+    command: ["python", "run_maintenance_scheduler.py"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://mayabu:${MAYABU_POSTGRES_PASSWORD:-mayabu_dev_password}@postgres:5432/mayabu
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 512m
+    cpus: "0.50"
+    restart: unless-stopped
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./logs:/app/logs
+
+volumes:
+  mayabu_pgdata:

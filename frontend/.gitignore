@@ -1,0 +1,9 @@
+node_modules/
+build/
+.react-router/
+coverage/
+playwright-report/
+test-results/
+.env
+.env.local
+*.log

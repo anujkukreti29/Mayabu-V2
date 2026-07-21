@@ -1,0 +1,19 @@
+Playwright E2E status in the build environment
+================================================
+
+The E2E suite is authored and Playwright discovers 10 tests across desktop Chromium and a Pixel 7 mobile project.
+
+Execution on this host is blocked before Mayabu code loads because the installed Chromium is managed with the policy:
+
+URLBlocklist: ["*"]
+
+Every local navigation fails with:
+
+net::ERR_BLOCKED_BY_ADMINISTRATOR
+
+This is not an application assertion failure. Run the suite on a normal development machine:
+
+  npx playwright install chromium
+  npm run test:e2e
+
+The deterministic fixture API is included in scripts/mock-api-server.mjs and does not access live ecommerce sites.

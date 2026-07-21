@@ -1,0 +1,1 @@
+"""Mayabu scraper adapters."""

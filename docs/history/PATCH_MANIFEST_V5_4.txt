@@ -1,0 +1,63 @@
+MAYABU v5.4 MANUAL PATCH MANIFEST
+=================================
+
+MODIFIED
+.env.example
+.gitignore
+README.md
+MAYABU_CURRENT_WORKING_BACKEND_ARCHITECTURE.md
+mayabu/__init__.py
+mayabu/api/search_routes.py
+mayabu/core/config.py
+mayabu/core/distributed_limit.py
+mayabu/domain/matching.py
+mayabu/jobs/worker.py
+mayabu/search/query_parser.py
+mayabu_db/repository.py
+mayabu_refresh/amazon.py
+mayabu_refresh/croma.py
+mayabu_refresh/flipkart.py
+mayabu_refresh/reliancedigital.py
+run_mayabu_db.py
+run_refresh_price.py
+scraper_health_check.py
+tests/test_v51_hardening.py
+tests/test_v53_scale_safety.py
+frontend/README.md
+frontend/package.json
+frontend/package-lock.json
+frontend/app/components/layout/footer.tsx
+frontend/app/components/layout/header.tsx
+frontend/app/components/pricing/price-history-chart.tsx
+frontend/app/hooks/use-verification.ts
+frontend/app/lib/api/client.ts
+frontend/app/lib/verification/state.ts
+frontend/app/lib/verification/state.test.ts
+frontend/app/routes/product-detail.tsx
+frontend/app/routes/sitemap[.]xml.ts
+
+ADDED
+MAYABU_V5_4_OPTIMIZATION_REPORT.md
+MAYABU_V5_4_MANUAL_UPGRADE_GUIDE.md
+PATCH_MANIFEST_V5_4.txt
+mayabu/scrapers/capacity.py
+tests/test_v54_refinement.py
+frontend/app/components/pricing/price-history-chart.test.tsx
+frontend/app/lib/api/client.test.ts
+frontend/app/lib/content/trust.ts
+frontend/app/lib/navigation/routes.ts
+frontend/app/lib/pricing/insight.ts
+frontend/app/lib/pricing/insight.test.ts
+frontend/app/lib/pricing/statistics.ts
+frontend/app/lib/pricing/statistics.test.ts
+
+DEPENDENCY CHANGE
+Removed frontend dependency: recharts
+Removed 35 npm packages from the resolved dependency graph.
+
+NO DATABASE MIGRATION
+No PostgreSQL schema file or migration is changed in v5.4.
+
+OPTIONAL NON-RUNTIME CLEANUP
+The complete baseline stores historical reports under docs/history and
+frontend/docs/history. Manual patch users may leave old reports in place.

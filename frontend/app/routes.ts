@@ -1,0 +1,28 @@
+import { index, route, type RouteConfig } from "@react-router/dev/routes";
+
+export default [
+  index("routes/home.tsx"),
+  route("search", "routes/search.tsx"),
+  route("laptops", "routes/category-laptops.tsx"),
+  route("mobile-phones", "routes/category-mobile-phones.tsx"),
+  route("products/:productId/:productSlug?", "routes/product-detail.tsx"),
+  route("compare", "routes/compare.tsx"),
+  route("deals", "routes/deals.tsx"),
+  route("tracker", "routes/tracker.tsx"),
+  route("platforms", "routes/platforms.tsx"),
+  route("how-it-works", "routes/how-it-works.tsx"),
+  route("about", "routes/about.tsx"),
+  route("contact", "routes/contact.tsx"),
+  route("privacy", "routes/privacy.tsx"),
+  route("terms", "routes/terms.tsx"),
+  route("disclaimer", "routes/disclaimer.tsx"),
+  route("assistant", "routes/assistant.tsx"),
+  route("login", "routes/login.tsx"),
+  route("signup", "routes/signup.tsx"),
+  route("account/*", "routes/account.tsx"),
+  route("admin/*", "routes/admin.tsx"),
+  route("robots.txt", "routes/robots[.]txt.ts"),
+  route("sitemap.xml", "routes/sitemap[.]xml.ts"),
+  route("health", "routes/frontend-health.ts"),
+  route("*", "routes/not-found.tsx"),
+] satisfies RouteConfig;

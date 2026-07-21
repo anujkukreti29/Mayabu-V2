@@ -1,0 +1,26 @@
+FROM python:3.13-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 mayabu \
+    && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin mayabu
+
+COPY requirements-core.txt requirements-worker.txt requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -m playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
+
+COPY --chown=mayabu:mayabu . .
+RUN mkdir -p artifacts/raw artifacts/debug logs \
+    && chown -R mayabu:mayabu artifacts logs
+USER mayabu
+
+CMD ["python", "worker_db.py", "--loop", "--concurrency", "2"]
