@@ -8,6 +8,7 @@ from mayabu.core.config import get_app_settings
 if __name__ == "__main__":
     settings = get_app_settings()
     development = settings.environment == "development"
+
     uvicorn.run(
         "mayabu.api.main:app",
         host=settings.api_host,
