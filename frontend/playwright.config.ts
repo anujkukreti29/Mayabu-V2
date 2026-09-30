@@ -7,6 +7,7 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: true,
   retries: 1,
+  workers: process.env.CI ? 4 : undefined,
   reporter: [["list"], ["html", { open: "never" }]],
   use: {
     baseURL: "http://127.0.0.1:5173",
@@ -16,7 +17,7 @@ export default defineConfig({
   webServer: {
     command: "node scripts/start-e2e.mjs",
     url: "http://127.0.0.1:5173",
-    reuseExistingServer: true,
+    reuseExistingServer: !process.env.CI,
     timeout: 120000,
   },
   projects: [

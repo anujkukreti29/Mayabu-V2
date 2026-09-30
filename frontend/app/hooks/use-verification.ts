@@ -1,5 +1,6 @@
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRevalidator } from "react-router";
 import { getVerificationJob, verifyPrice } from "~/lib/api/verification";
 import type { VerificationJob, VerificationRequest } from "~/lib/api/schemas";
 import { productKeys, verificationKeys } from "~/lib/query/keys";
@@ -107,6 +108,7 @@ function writeStored(productId: string, value: StoredTasks | null): void {
 
 export function useVerification(productId: string) {
   const queryClient = useQueryClient();
+  const revalidator = useRevalidator();
   const visible = usePageVisibility();
   const [taskIds, setTaskIds] = useState<string[]>([]);
   const [startedAt, setStartedAt] = useState<number | null>(null);
@@ -145,6 +147,7 @@ export function useVerification(productId: string) {
       if (response.status === "fresh" || response.status === "cooldown") {
         void queryClient.invalidateQueries({ queryKey: productKeys.detail(productId) });
         void queryClient.invalidateQueries({ queryKey: verificationKeys.status(productId) });
+        void revalidator.revalidate();
       }
     },
   });
@@ -157,10 +160,12 @@ export function useVerification(productId: string) {
       staleTime: 750,
       retry: 1,
       refetchIntervalInBackground: false,
-      refetchInterval: (query: { state: { data?: VerificationJob } }) => {
+        refetchInterval: (query: { state: { data?: VerificationJob } }) => {
         const status = query.state.data?.status;
         if (status && TERMINAL.has(status)) return false;
-        return Date.now() - (startedAt ?? Date.now()) < 10_000 ? 2_000 : 4_000;
+        // Faster initial polls so completed retailer tasks surface quickly;
+        // modest backoff after 8s to limit API load.
+        return Date.now() - (startedAt ?? Date.now()) < 8_000 ? 1_250 : 3_000;
       },
     })),
   });
@@ -182,7 +187,9 @@ export function useVerification(productId: string) {
     if (jobs.some((job) => job.status === "completed")) {
       void queryClient.invalidateQueries({ queryKey: productKeys.priceHistory(productId, 180) });
     }
-  }, [allTerminal, jobs, productId, queryClient]);
+    // PDP uses loader data — revalidate so best price / freshness / offers refresh.
+    void revalidator.revalidate();
+  }, [allTerminal, jobs, productId, queryClient, revalidator]);
 
   const summary = useMemo<VerificationSummary>(
     () =>

@@ -27,20 +27,24 @@ export function formatRelativeTime(value: string, now = Date.now()): string | nu
   return relativeFormatter.format(Math.round(deltaSeconds / unitSeconds), unit);
 }
 
+/**
+ * Labels stored price-observation age honestly.
+ * Does not claim live verification unless a separate verification flow succeeded.
+ */
 export function freshnessFrom(value: string | null | undefined): {
   label: string;
   tone: FreshnessTone;
 } {
-  if (!value) return { label: "Verification unavailable", tone: "neutral" };
+  if (!value) return { label: "Freshness unavailable", tone: "neutral" };
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) {
-    return { label: "Verification unavailable", tone: "neutral" };
+    return { label: "Freshness unavailable", tone: "neutral" };
   }
 
   const ageMinutes = Math.max(0, (Date.now() - timestamp) / 60_000);
   const distance = formatRelativeTime(value);
-  if (!distance) return { label: "Verification unavailable", tone: "neutral" };
-  if (ageMinutes <= 15) return { label: "Verified recently", tone: "success" };
+  if (!distance) return { label: "Freshness unavailable", tone: "neutral" };
+  if (ageMinutes <= 15) return { label: "Checked recently", tone: "success" };
   if (ageMinutes <= 24 * 60) return { label: `Last checked ${distance}`, tone: "success" };
   return { label: `Last known price · ${distance}`, tone: "warning" };
 }

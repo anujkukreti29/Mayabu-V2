@@ -7,16 +7,13 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from mayabu.core.config import AppSettings, get_app_settings
+from mayabu.platforms.registry import all_platforms
 from mayabu.verification.platform_gate import distributed_platform_slot
 from mayabu_common import canonical_platform
 
 # Conservative retailer limits remain explicit and easy to review.
-_PLATFORM_CAPS: dict[str, int] = {
-    "amazon": 1,
-    "croma": 1,
-    "reliancedigital": 1,
-    "flipkart": 2,
-}
+# New platforms start at 1 concurrent discovery/refresh slot.
+_PLATFORM_CAPS: dict[str, int] = {p.slug: p.discovery_cap for p in all_platforms(enabled_only=False)}
 _DEFAULT_PLATFORM_CAP = 1
 
 

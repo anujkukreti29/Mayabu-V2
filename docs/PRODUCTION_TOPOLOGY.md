@@ -10,6 +10,7 @@ is not an HA deployment template.
 
 - One API host with 1-2 Uvicorn worker processes.
 - One background worker replica with concurrency 1-2.
+- One scheduler replica (`python -m mayabu.scheduler`) with a database lease; extra replicas standby.
 - Managed PostgreSQL with automated backups and point-in-time recovery.
 - Managed Redis with persistence disabled for cache data but an HA/failover
   option enabled because Redis also coordinates rate limits and scraper slots.

@@ -5,6 +5,14 @@ import asyncio
 import urllib.parse
 from typing import Any
 
+from mayabu.scrapers.page_saturation import (
+    EMERGENCY_PAGE,
+    begin_page_run,
+    finish_page_run,
+    ids_from_records,
+    mark_stop,
+    observe_page,
+)
 from mayabu_common import utc_now
 from mayabu_scraper_base import (
     BrowserSession,
@@ -28,6 +36,7 @@ async def scrape_flipkart(
     output: str | None = None,
     headless: bool = True,
     debug: bool = False,
+    start_page: int = 1,
 ) -> list[dict[str, Any]]:
     """Discover Flipkart products without relying on generated CSS classes.
 
@@ -39,13 +48,18 @@ async def scrape_flipkart(
     config = ScrapeConfig(query=query, max_products=max_products, max_pages=max_pages, output=output, headless=headless, debug=debug)
     observed_at = utc_now()
     raw_records: list[dict[str, Any]] = []
+    begin_page_run()
 
     async with BrowserSession(headless=headless, timeout_ms=config.timeout_ms) as session:
         page = await session.new_page()
+        page.set_default_timeout(config.timeout_ms)
         encoded = urllib.parse.quote_plus(query)
         total_pages = max_pages or 1
-        for page_no in range(1, total_pages + 1):
+        first_page = max(1, int(start_page or 1))
+        last_allowed = min(first_page + total_pages - 1, EMERGENCY_PAGE)
+        for page_no in range(first_page, last_allowed + 1):
             if max_products and len(raw_records) >= max_products:
+                mark_stop("product_budget")
                 break
             url = f"https://www.flipkart.com/search?q={encoded}&marketplace=FLIPKART&page={page_no}"
             print(f"[flipkart] page {page_no}: {url}")
@@ -54,6 +68,7 @@ async def scrape_flipkart(
                 await page.wait_for_timeout(1800)
             except Exception as exc:
                 print(f"[flipkart] navigation failed on page {page_no}: {exc}")
+                mark_stop("navigation_failed")
                 break
             await close_common_popups(page)
             await human_scroll(page, steps=6)
@@ -70,12 +85,18 @@ async def scrape_flipkart(
             print(f"[flipkart] page {page_no}: +{len(page_records)} structural cards")
             if not page_records:
                 # Do not chase generated classes here. Capture state when debug is on.
+                observe_page(page_no, [])
                 if debug:
                     from mayabu_scraper_base import capture_debug_artifacts
                     artifacts = await capture_debug_artifacts(page, PLATFORM, query, f"zero_structural_page_{page_no}")
                     print(f"[flipkart] debug artifacts: {artifacts}")
                 break
+            stop = observe_page(page_no, ids_from_records(PLATFORM, page_records))
+            if stop:
+                print(f"[flipkart] stop {stop} on page {page_no}")
+                break
             await polite_sleep(config)
+    finish_page_run()
 
     records = finalize_records(PLATFORM, query, raw_records, observed_at)
     health = discovery_health_report(records, min_products=min(10, max_products or 10))

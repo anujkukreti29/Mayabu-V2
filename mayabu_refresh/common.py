@@ -22,12 +22,7 @@ DEFAULT_USER_AGENT = os.getenv("MAYABU_DEFAULT_USER_AGENT") or (
     "Chrome/150.0.0.0 Safari/537.36"
 )
 
-PLATFORM_DOMAINS = {
-    "amazon": ("amazon.in", "www.amazon.in"),
-    "flipkart": ("flipkart.com", "www.flipkart.com"),
-    "croma": ("croma.com", "www.croma.com"),
-    "reliancedigital": ("reliancedigital.in", "www.reliancedigital.in"),
-}
+from mayabu.platforms.registry import PLATFORM_HOSTS as PLATFORM_DOMAINS
 
 BAD_PRICE_CONTEXT = (
     "emi",
@@ -59,13 +54,17 @@ BAD_PRICE_CONTEXT = (
 
 
 def clean_price_to_int(
-    value: Any, *, min_value: int = 5_000, max_value: int = 500_000
+    value: Any, *, min_value: int = 100, max_value: int = 2_000_000, category: str | None = None
 ) -> int | None:
-    """Convert an Indian laptop price string to integer rupees.
+    """Convert an Indian retail price string to integer rupees.
 
-    A safety range is applied for the laptop MVP so EMI/fee/coupon fragments do
-    not become the main price.
+    Category-aware bounds reject obvious extraction mistakes without assuming
+    laptop-only price ranges for TVs, cameras, appliances, etc.
     """
+    if category:
+        from mayabu.domain.categories.registry import price_bounds_for
+
+        min_value, max_value = price_bounds_for(category)
     if value is None:
         return None
     text = str(value).strip()
@@ -132,32 +131,25 @@ def extract_discount_percent(text: str | None) -> float | None:
 
 
 def detect_stock_status(text: str | None) -> str:
-    value = (text or "").lower()
-    if any(
-        token in value
-        for token in (
-            "outofstock",
-            "out of stock",
-            "currently unavailable",
-            "sold out",
-            "not available",
-        )
-    ):
-        return "out_of_stock"
-    if any(
-        token in value
-        for token in (
-            "instock",
-            "in stock",
-            "add to cart",
-            "buy now",
-            "available to order",
-        )
-    ):
-        return "in_stock"
-    if any(token in value for token in ("coming soon", "notify me")):
-        return "coming_soon"
-    return "unknown"
+    """Classify stock from page text. UNKNOWN never becomes OOS from weak signals.
+
+    Prefer mayabu_refresh.stock.classify_stock_text for structured evidence.
+    """
+    from mayabu_refresh.stock import classify_stock_text
+
+    return classify_stock_text(text, scoped=False).public_stock
+
+
+def classify_and_apply_stock(result: "RefreshResult", text: str | None, *, scoped: bool = False) -> None:
+    """Set stock fields on a RefreshResult from evidence-based classification."""
+    from mayabu_refresh.stock import classify_stock_text
+
+    classified = classify_stock_text(text, page_status=result.page_status, scoped=scoped)
+    result.stock_status = classified.public_stock  # type: ignore[assignment]
+    result.stock_reason = classified.reason
+    result.stock_confidence = classified.confidence
+    if classified.state == "challenge" and result.page_status not in {"blocked", "captcha"}:
+        result.page_status = "captcha"
 
 
 def validate_platform_url(platform: str, url: str) -> bool:

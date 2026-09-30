@@ -1,156 +1,169 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { ChevronDown, Menu, Search, X } from "lucide-react";
-import { useState } from "react";
-import { Link, NavLink, useLocation } from "react-router";
+import { Menu, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { NavLink, useLocation } from "react-router";
+import { CategoriesMegaMenu } from "~/components/layout/categories-mega-menu";
+import { CategoriesNavControl } from "~/components/layout/categories-nav-control";
+import { HeaderAccountActions } from "~/components/layout/header-account-actions";
+import { MayabuLogo } from "~/components/layout/mayabu-logo";
 import { SearchForm } from "~/components/search/search-form";
 import { env } from "~/lib/config/env";
-import {
-  categoryLinks,
-  futureCategories,
-  primaryNavigation,
-  routes,
-} from "~/lib/navigation/routes";
+import { primaryNavigation, routes } from "~/lib/navigation/routes";
 import { sellerStatement } from "~/lib/content/trust";
 import { cn } from "~/components/ui/cn";
 
 const publicLinks = primaryNavigation(env.features);
 
-function activeClass({ isActive }: { isActive: boolean }) {
+function desktopLinkClass({ isActive }: { isActive: boolean }) {
+  return cn("nav-link", isActive && "nav-link-active");
+}
+
+function mobileLinkClass({ isActive }: { isActive: boolean }) {
   return cn(
-    "inline-flex min-h-11 items-center rounded-lg px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100 hover:text-slate-950",
-    isActive && "bg-brand-50 text-brand-700 underline decoration-2 underline-offset-4",
+    "inline-flex min-h-11 items-center rounded-md px-3 text-sm font-medium text-ink-muted transition hover:bg-surface-muted hover:text-ink",
+    isActive && "bg-accent-soft text-accent-strong",
   );
 }
 
 export function Header() {
   const [open, setOpen] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
   const location = useLocation();
+  const isHome = location.pathname === routes.home;
+  const searchDefault =
+    location.pathname === routes.search
+      ? (new URLSearchParams(location.search).get("q") ?? "")
+      : "";
+
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 8);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
 
   return (
-    <header className="sticky top-0 z-50 border-b border-slate-200 bg-white/95 backdrop-blur">
-      <div className="page-container flex min-h-16 items-center gap-3">
-        <Link
-          to={routes.home}
-          className="inline-flex min-h-11 items-center gap-2 rounded-lg font-black text-slate-950"
-          aria-label="Mayabu home"
-        >
-          <span className="grid h-9 w-9 place-items-center rounded-xl bg-brand-600 text-white">
-            M
-          </span>
-          <span className="text-lg">Mayabu</span>
-        </Link>
-        <div className="hidden min-w-0 max-w-xl flex-1 md:block">
-          <SearchForm
-            compact
-            defaultValue={
-              location.pathname === routes.search
-                ? (new URLSearchParams(location.search).get("q") ?? "")
-                : ""
-            }
-          />
+    <header
+      className={cn(
+        "sticky top-0 z-nav border-b border-white/10 bg-header text-white transition-[box-shadow,height] duration-smooth",
+        scrolled && "shadow-header",
+      )}
+    >
+      <div
+        className={cn(
+          "page-container flex items-center gap-3 transition-[height] duration-smooth lg:gap-5",
+          scrolled ? "h-14 lg:h-[3.75rem]" : "h-14 sm:h-[3.75rem] lg:h-16",
+        )}
+      >
+        <div className="flex shrink-0 items-center border-r border-white/10 pr-3 lg:pr-5">
+          <MayabuLogo variant="on-dark" priority className="shrink-0" />
         </div>
-        <nav aria-label="Primary navigation" className="ml-auto hidden items-center xl:flex">
-          <DropdownMenu.Root>
-            <DropdownMenu.Trigger className="inline-flex min-h-11 items-center gap-1 rounded-lg px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100">
-              Categories <ChevronDown aria-hidden="true" className="h-4 w-4" />
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <DropdownMenu.Content
-                sideOffset={8}
-                className="z-[60] min-w-64 rounded-xl border border-slate-200 bg-white p-2 shadow-xl"
-              >
-                {categoryLinks.map((link) => (
-                  <DropdownMenu.Item key={link.to} asChild>
-                    <Link
-                      to={link.to}
-                      className="block rounded-lg px-3 py-3 text-sm font-semibold outline-none hover:bg-slate-100 focus:bg-slate-100"
-                    >
-                      {link.label}
-                    </Link>
-                  </DropdownMenu.Item>
-                ))}
-                <div className="my-1 border-t border-slate-100" />
-                {futureCategories.map((item) => (
-                  <div
-                    key={item}
-                    className="flex items-center justify-between rounded-lg px-3 py-3 text-sm text-slate-500"
-                  >
-                    {item}
-                    <span className="text-xs font-semibold">Coming later</span>
-                  </div>
-                ))}
-              </DropdownMenu.Content>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
-          {publicLinks.map((link) => (
-            <NavLink key={link.to} to={link.to} className={activeClass}>
-              {link.label}
-            </NavLink>
-          ))}
-        </nav>
-        <Link
-          to={routes.search}
-          className="ml-auto grid h-11 w-11 place-items-center rounded-xl border border-slate-300 md:hidden"
-          aria-label="Search Mayabu"
+
+        {!isHome ? (
+          <div className="hidden min-w-[16rem] max-w-3xl flex-1 lg:block xl:min-w-[22rem]">
+            <SearchForm
+              compact
+              tone="header"
+              inputId="nav-search"
+              defaultValue={searchDefault}
+              key={searchDefault}
+            />
+          </div>
+        ) : (
+          <div className="hidden min-w-0 flex-1 lg:block" aria-hidden="true" />
+        )}
+
+        <nav
+          aria-label="Primary navigation"
+          className="ml-auto hidden items-center gap-0.5 lg:flex"
         >
-          <Search aria-hidden="true" className="h-5 w-5" />
-        </Link>
+          <CategoriesNavControl />
+          {publicLinks.map((link) =>
+            link.to.startsWith("/#") ? (
+              <a key={link.to} href={link.to} className="nav-link">
+                {link.label}
+              </a>
+            ) : (
+              <NavLink key={link.to} to={link.to} className={desktopLinkClass}>
+                {link.label}
+              </NavLink>
+            ),
+          )}
+        </nav>
+
+        <div className="ml-1 hidden h-6 w-px bg-white/15 sm:block lg:ml-2" aria-hidden="true" />
+        <HeaderAccountActions className="hidden sm:flex" />
+
         <Dialog.Root open={open} onOpenChange={setOpen}>
           <Dialog.Trigger asChild>
             <button
-              className="grid h-11 w-11 place-items-center rounded-xl border border-slate-300 xl:hidden"
+              className="ml-auto grid h-10 w-10 place-items-center rounded-md border border-white/15 text-white transition hover:bg-white/10 lg:hidden"
               aria-label={open ? "Close menu" : "Open menu"}
             >
-              <Menu aria-hidden="true" className="h-5 w-5" />
+              <Menu aria-hidden="true" className="h-[1.125rem] w-[1.125rem]" />
             </button>
           </Dialog.Trigger>
           <Dialog.Portal>
-            <Dialog.Overlay className="fixed inset-0 z-[70] bg-slate-950/40" />
-            <Dialog.Content className="fixed inset-y-0 right-0 z-[80] w-[min(92vw,24rem)] overflow-y-auto bg-white p-5 shadow-2xl focus:outline-none">
-              <div className="flex items-center justify-between">
+            <Dialog.Overlay className="fixed inset-0 z-[70] bg-slate-950/50" />
+            <Dialog.Content className="fixed inset-y-0 right-0 z-[80] w-[min(92vw,24rem)] overflow-y-auto bg-white p-5 text-ink shadow-lift focus:outline-none">
+              <div className="flex items-center justify-between gap-3">
                 <div>
-                  <Dialog.Title className="text-lg font-black">Mayabu menu</Dialog.Title>
+                  <Dialog.Title className="text-base font-semibold">Mayabu menu</Dialog.Title>
                   <Dialog.Description className="sr-only">
-                    Navigate Mayabu categories, product comparison, supported platforms, and trust
-                    pages.
+                    Navigate Mayabu categories, compare, and account pages.
                   </Dialog.Description>
                 </div>
                 <Dialog.Close
-                  className="grid h-11 w-11 place-items-center rounded-xl border border-slate-300"
+                  className="grid h-11 w-11 place-items-center rounded-md border border-line"
                   aria-label="Close menu"
                 >
                   <X aria-hidden="true" className="h-5 w-5" />
                 </Dialog.Close>
               </div>
               <div className="mt-5">
-                <SearchForm compact />
+                <SearchForm compact inputId="menu-search" defaultValue={searchDefault} />
               </div>
-              <nav aria-label="Mobile navigation" className="mt-6 grid gap-1">
-                {categoryLinks.map((link) => (
-                  <NavLink
-                    key={link.to}
-                    to={link.to}
-                    onClick={() => setOpen(false)}
-                    className={activeClass}
-                  >
-                    {link.label}
-                  </NavLink>
-                ))}
-                {publicLinks.map((link) => (
-                  <NavLink
-                    key={link.to}
-                    to={link.to}
-                    onClick={() => setOpen(false)}
-                    className={activeClass}
-                  >
-                    {link.label}
-                  </NavLink>
-                ))}
+              <div className="mt-4 flex gap-2 sm:hidden">
+                <HeaderAccountActions />
+              </div>
+              <div className="mt-6 border-t border-line pt-5">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
+                  Categories
+                </p>
+                <div className="mt-3">
+                  <CategoriesMegaMenu
+                    onNavigate={() => setOpen(false)}
+                    className="sm:grid-cols-1"
+                  />
+                </div>
+              </div>
+              <nav
+                aria-label="Mobile navigation"
+                className="mt-6 grid gap-1 border-t border-line pt-5"
+              >
+                {publicLinks.map((link) =>
+                  link.to.startsWith("/#") ? (
+                    <a
+                      key={link.to}
+                      href={link.to}
+                      className={mobileLinkClass({ isActive: false })}
+                      onClick={() => setOpen(false)}
+                    >
+                      {link.label}
+                    </a>
+                  ) : (
+                    <NavLink
+                      key={link.to}
+                      to={link.to}
+                      className={mobileLinkClass}
+                      onClick={() => setOpen(false)}
+                    >
+                      {link.label}
+                    </NavLink>
+                  ),
+                )}
               </nav>
-              <p className="mt-8 rounded-xl bg-slate-50 p-4 text-xs leading-5 text-slate-600">
-                {sellerStatement} Prices and availability can change on retailer websites.
-              </p>
+              <p className="mt-8 text-xs leading-5 text-ink-muted">{sellerStatement}</p>
             </Dialog.Content>
           </Dialog.Portal>
         </Dialog.Root>

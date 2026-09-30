@@ -50,6 +50,16 @@ npm run dev
 
 Open `http://127.0.0.1:5173`.
 
+If search shows “temporarily unavailable”, the API is usually not running.
+Confirm with:
+
+```cmd
+python scripts\dev_doctor.py
+```
+
+In development the browser calls same-origin `/api` (Vite proxies to the API).
+SSR uses `VITE_API_SERVER_URL` (default `http://127.0.0.1:8000`).
+
 ## Validation
 
 Backend:

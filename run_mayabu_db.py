@@ -20,6 +20,7 @@ from mayabu_db.repository import auto_merge_duplicate_products
 from mayabu_db.scraper_runner import run_discovery_scraper
 from mayabu_db.tasks import finish_run, start_run
 from mayabu.scrapers.capacity import scraper_capacity
+from mayabu.platforms.registry import iter_enabled_slugs
 from mayabu.search.index_manager import (
     drain_dirty_search_documents,
     refresh_product_search_documents,
@@ -27,6 +28,7 @@ from mayabu.search.index_manager import (
 from mayabu.services.variant_groups import refresh_variant_groups
 
 T = TypeVar("T")
+_DEFAULT_PLATFORMS = list(iter_enabled_slugs())
 
 
 def _env_int(name: str, default: int) -> int:
@@ -255,7 +257,7 @@ def main() -> None:
     parser.add_argument(
         "--platforms",
         nargs="+",
-        default=["amazon", "flipkart", "croma", "reliancedigital"],
+        default=_DEFAULT_PLATFORMS,
     )
     parser.add_argument("--max-pages", type=int, default=2)
     parser.add_argument("--max-products", type=int, default=50)

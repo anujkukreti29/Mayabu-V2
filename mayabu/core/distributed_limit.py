@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import re
 import time
@@ -87,7 +88,14 @@ def _redis_required() -> bool:
 
 
 def _slot_key(namespace: str, resource: str) -> str:
-    return f"mayabu:slots:{_key_part(namespace)}:{_key_part(resource)}"
+    settings = get_app_settings()
+    prefix = _key_part(
+        getattr(settings, "redis_key_prefix", None)
+        or getattr(settings, "environment", None)
+        or "development"
+    )
+    return f"mayabu:{prefix}:slots:{_key_part(namespace)}:{_key_part(resource)}"
+
 
 
 async def _redis_call(function: Any, *args: Any) -> Any:

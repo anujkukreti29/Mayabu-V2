@@ -31,7 +31,7 @@ create index if not exists idx_product_clusters_updated_at on product_clusters(u
 create table if not exists platform_listings (
   id uuid primary key default gen_random_uuid(),
   product_id uuid references product_clusters(id) on delete set null,
-  platform text not null check (platform in ('amazon','flipkart','croma','reliancedigital')),
+  platform text not null check (platform in ('amazon','flipkart','croma','reliancedigital','vijaysales','jiomart','poorvika','bajajelectronics')),
   listing_id text not null unique,
   native_id text,
   listing_url text not null,
@@ -74,7 +74,7 @@ create index if not exists idx_platform_listings_specs_gin on platform_listings 
 
 create table if not exists scrape_tasks (
   id uuid primary key default gen_random_uuid(),
-  platform text not null check (platform in ('amazon','flipkart','croma','reliancedigital')),
+  platform text not null check (platform in ('amazon','flipkart','croma','reliancedigital','vijaysales','jiomart','poorvika','bajajelectronics')),
   task_type text not null check (task_type in ('discovery','refresh_listing','diagnostic')),
   query text,
   url text,
@@ -262,7 +262,7 @@ create index if not exists idx_scraper_diagnostics_run on scraper_diagnostics(ru
 create table if not exists scheduler_plans (
   id uuid primary key default gen_random_uuid(),
   name text not null unique,
-  platform text not null check (platform in ('amazon','flipkart','croma','reliancedigital')),
+  platform text not null check (platform in ('amazon','flipkart','croma','reliancedigital','vijaysales','jiomart','poorvika','bajajelectronics')),
   task_type text not null check (task_type in ('discovery','refresh_listing','diagnostic')),
   query text,
   cadence_minutes integer not null,
@@ -322,13 +322,26 @@ alter table platform_listings add column if not exists currency text not null de
 alter table scrape_tasks add column if not exists platform_listing_id uuid references platform_listings(id) on delete set null;
 
 -- Broaden task type/status constraints for the long-term architecture while keeping old names compatible.
+-- Keep the full allow-list here: intermediate narrower checks break re-apply when verify_listing rows exist.
 alter table scrape_tasks drop constraint if exists scrape_tasks_task_type_check;
-alter table scrape_tasks add constraint scrape_tasks_task_type_check check (task_type in ('discovery','discovery_search','refresh_listing','refresh_hot_product','retry_failed','enrichment','diagnostic'));
+alter table scrape_tasks add constraint scrape_tasks_task_type_check check (
+  task_type in (
+    'discovery','discovery_search','refresh_listing','refresh_hot_product',
+    'retry_failed','enrichment','enrich_listing','targeted_discovery','diagnostic',
+    'direct_ingest','index_product','maintenance','verify_listing'
+  )
+);
 alter table scrape_tasks drop constraint if exists scrape_tasks_status_check;
 alter table scrape_tasks add constraint scrape_tasks_status_check check (status in ('pending','running','completed','failed','dead','cancelled','paused'));
 alter table scrape_runs drop constraint if exists scrape_runs_task_type_check;
 alter table scheduler_plans drop constraint if exists scheduler_plans_task_type_check;
-alter table scheduler_plans add constraint scheduler_plans_task_type_check check (task_type in ('discovery','discovery_search','refresh_listing','refresh_hot_product','retry_failed','enrichment','diagnostic'));
+alter table scheduler_plans add constraint scheduler_plans_task_type_check check (
+  task_type in (
+    'discovery','discovery_search','refresh_listing','refresh_hot_product',
+    'retry_failed','enrichment','enrich_listing','targeted_discovery','diagnostic',
+    'direct_ingest','index_product','maintenance','verify_listing'
+  )
+);
 
 create table if not exists search_queries (
   id uuid primary key default gen_random_uuid(),
@@ -371,7 +384,7 @@ create index if not exists idx_query_demand_brand on query_demand_clusters(detec
 
 create table if not exists scrape_budget (
   id uuid primary key default gen_random_uuid(),
-  platform text not null check (platform in ('amazon','flipkart','croma','reliancedigital')),
+  platform text not null check (platform in ('amazon','flipkart','croma','reliancedigital','vijaysales','jiomart','poorvika','bajajelectronics')),
   budget_date date not null,
   discovery_budget integer not null,
   refresh_budget integer not null,
@@ -385,7 +398,7 @@ create table if not exists scrape_budget (
 create index if not exists idx_scrape_budget_date on scrape_budget(budget_date desc, platform);
 
 create table if not exists platform_health (
-  platform text primary key check (platform in ('amazon','flipkart','croma','reliancedigital')),
+  platform text primary key check (platform in ('amazon','flipkart','croma','reliancedigital','vijaysales','jiomart','poorvika','bajajelectronics')),
   status text not null default 'healthy' check (status in ('healthy','degraded','blocked','paused')),
   reason text,
   block_rate numeric(7,4) not null default 0,
@@ -395,8 +408,14 @@ create table if not exists platform_health (
   last_failure_at timestamptz,
   updated_at timestamptz not null default now()
 );
+-- Widen check before seed inserts. Older DBs may still have a narrower
+-- platform_health_platform_check that rejects vijaysales/poorvika/etc.
+alter table platform_health drop constraint if exists platform_health_platform_check;
+alter table platform_health add constraint platform_health_platform_check check (
+  platform in ('amazon','flipkart','croma','reliancedigital','vijaysales','jiomart','poorvika','bajajelectronics')
+);
 insert into platform_health(platform)
-values ('amazon'), ('flipkart'), ('croma'), ('reliancedigital')
+values ('amazon'), ('flipkart'), ('croma'), ('reliancedigital'), ('vijaysales'), ('jiomart'), ('poorvika'), ('bajajelectronics')
 on conflict (platform) do nothing;
 
 -- Helpful search indexes. pg_trgm is optional but useful for fuzzy title queries.
@@ -428,6 +447,42 @@ alter table product_clusters add column if not exists search_tsv tsvector genera
 ) stored;
 create index if not exists idx_product_clusters_search_tsv on product_clusters using gin(search_tsv);
 
+-- Public-offer gate used by best-price view and search-document refresh.
+-- Keep in sync with mayabu.platforms.coverage production cells.
+create or replace function mayabu_listing_is_public_offer(
+  p_platform text,
+  p_category text
+) returns boolean
+language sql
+immutable
+as $$
+  select case
+    when p_platform in ('amazon', 'flipkart', 'croma', 'reliancedigital') then true
+    when p_platform = 'vijaysales' and p_category in (
+      'laptop', 'smartphone', 'television', 'refrigerator', 'washing_machine', 'camera'
+    ) then true
+    when p_platform = 'poorvika' and p_category in ('laptop', 'smartphone') then true
+    else false
+  end;
+$$;
+
+create or replace function mayabu_listing_is_public_priced(
+  p_platform text,
+  p_category text,
+  p_match_status text,
+  p_current_price numeric,
+  p_currency text
+) returns boolean
+language sql
+immutable
+as $$
+  select p_match_status = 'matched'
+     and p_current_price is not null
+     and p_current_price > 0
+     and coalesce(p_currency, 'INR') = 'INR'
+     and mayabu_listing_is_public_offer(p_platform, p_category);
+$$;
+
 create or replace view current_product_best_prices as
 select
   p.id as product_id,
@@ -435,19 +490,36 @@ select
   p.brand,
   p.canonical_title,
   p.specs,
-  min(l.current_price) filter (
-    where l.current_price is not null
-      and l.stock_status <> 'out_of_stock'
-      and coalesce(l.currency, 'INR') = 'INR'
+  coalesce(
+    min(l.current_price) filter (
+      where mayabu_listing_is_public_priced(
+              l.platform, p.category, l.match_status, l.current_price, l.currency
+            )
+        and l.stock_status <> 'out_of_stock'
+    ),
+    min(l.current_price) filter (
+      where mayabu_listing_is_public_priced(
+              l.platform, p.category, l.match_status, l.current_price, l.currency
+            )
+    )
   ) as best_price,
-  (array_agg(l.platform order by l.current_price asc nulls last) filter (
-    where l.current_price is not null
-      and l.stock_status <> 'out_of_stock'
-      and coalesce(l.currency, 'INR') = 'INR'
-  ))[1] as best_platform,
+  coalesce(
+    (array_agg(l.platform order by l.current_price asc nulls last) filter (
+      where mayabu_listing_is_public_priced(
+              l.platform, p.category, l.match_status, l.current_price, l.currency
+            )
+        and l.stock_status <> 'out_of_stock'
+    ))[1],
+    (array_agg(l.platform order by l.current_price asc nulls last) filter (
+      where mayabu_listing_is_public_priced(
+              l.platform, p.category, l.match_status, l.current_price, l.currency
+            )
+    ))[1]
+  ) as best_platform,
   count(distinct l.platform) filter (
-    where l.current_price is not null
-      and coalesce(l.currency, 'INR') = 'INR'
+    where mayabu_listing_is_public_priced(
+            l.platform, p.category, l.match_status, l.current_price, l.currency
+          )
   ) as platform_count,
   max(l.last_seen_at) as last_seen_at
 from product_clusters p
@@ -764,30 +836,49 @@ begin
     case when (p.specs->>'storage_gb') ~ '^[0-9]+$' then (p.specs->>'storage_gb')::integer end,
     case when (p.specs->>'screen_inch') ~ '^[0-9]+(\.[0-9]+)?$' then (p.specs->>'screen_inch')::numeric end,
     (
-      select min(l.current_price)
+      select coalesce(
+        min(l.current_price) filter (where l.stock_status <> 'out_of_stock'),
+        min(l.current_price)
+      )
       from platform_listings l
-      where l.product_id = p.id and l.match_status = 'matched'
-        and l.current_price is not null and l.stock_status <> 'out_of_stock'
-        and coalesce(l.currency, 'INR') = 'INR'
+      where l.product_id = p.id
+        and mayabu_listing_is_public_priced(
+          l.platform, p.category, l.match_status, l.current_price, l.currency
+        )
     ),
     (
       select l.platform
       from platform_listings l
-      where l.product_id = p.id and l.match_status = 'matched'
-        and l.current_price is not null and l.stock_status <> 'out_of_stock'
-        and coalesce(l.currency, 'INR') = 'INR'
+      where l.product_id = p.id
+        and mayabu_listing_is_public_priced(
+          l.platform, p.category, l.match_status, l.current_price, l.currency
+        )
+        and (
+          l.stock_status <> 'out_of_stock'
+          or not exists (
+            select 1 from platform_listings x
+            where x.product_id = p.id
+              and mayabu_listing_is_public_priced(
+                x.platform, p.category, x.match_status, x.current_price, x.currency
+              )
+              and x.stock_status <> 'out_of_stock'
+          )
+        )
       order by l.current_price asc, l.last_seen_at desc
       limit 1
     ),
     (
       select count(distinct l.platform)::integer
       from platform_listings l
-      where l.product_id = p.id and l.match_status = 'matched'
-        and l.current_price is not null and coalesce(l.currency, 'INR') = 'INR'
+      where l.product_id = p.id
+        and mayabu_listing_is_public_priced(
+          l.platform, p.category, l.match_status, l.current_price, l.currency
+        )
     ),
     (
       select count(*)::integer from platform_listings l
       where l.product_id = p.id and l.match_status = 'matched'
+        and mayabu_listing_is_public_offer(l.platform, p.category)
     ),
     (
       select l.image_url from platform_listings l
@@ -892,8 +983,8 @@ alter table scrape_tasks add column if not exists created_by text not null defau
 alter table scrape_tasks drop constraint if exists scrape_tasks_task_type_check;
 alter table scrape_tasks add constraint scrape_tasks_task_type_check check (
   task_type in ('discovery','discovery_search','refresh_listing','refresh_hot_product',
-                'retry_failed','enrichment','diagnostic','direct_ingest',
-                'index_product','maintenance')
+                'retry_failed','enrichment','enrich_listing','targeted_discovery','diagnostic',
+                'direct_ingest','index_product','maintenance','verify_listing')
 );
 alter table scrape_tasks drop constraint if exists scrape_tasks_status_check;
 alter table scrape_tasks add constraint scrape_tasks_status_check check (
@@ -901,7 +992,7 @@ alter table scrape_tasks add constraint scrape_tasks_status_check check (
 );
 alter table scrape_tasks drop constraint if exists scrape_tasks_platform_check;
 alter table scrape_tasks add constraint scrape_tasks_platform_check check (
-  platform in ('amazon','flipkart','croma','reliancedigital','system')
+  platform in ('amazon','flipkart','croma','reliancedigital','vijaysales','jiomart','poorvika','bajajelectronics','system')
 );
 create unique index if not exists idx_scrape_tasks_idempotency_active
   on scrape_tasks(idempotency_key)
@@ -969,8 +1060,8 @@ alter table scrape_tasks add column if not exists request_count integer not null
 alter table scrape_tasks drop constraint if exists scrape_tasks_task_type_check;
 alter table scrape_tasks add constraint scrape_tasks_task_type_check check (
   task_type in ('discovery','discovery_search','refresh_listing','refresh_hot_product',
-                'retry_failed','enrichment','diagnostic','direct_ingest',
-                'index_product','maintenance','verify_listing')
+                'retry_failed','enrichment','enrich_listing','targeted_discovery','diagnostic',
+                'direct_ingest','index_product','maintenance','verify_listing')
 );
 create index if not exists idx_scrape_tasks_live_verification_active
   on scrape_tasks(status, priority, scheduled_at, created_at)
@@ -999,3 +1090,235 @@ create index if not exists idx_live_verification_events_platform_time
   on live_verification_events(platform, created_at desc);
 create index if not exists idx_live_verification_events_created_at
   on live_verification_events(created_at);
+
+
+-- ============================================================
+-- Platform registry + scalable daily platform prices (v5.6)
+-- Idempotent upgrades for existing databases.
+-- ============================================================
+
+create table if not exists platform_registry (
+  slug text primary key,
+  display_name text not null,
+  enabled boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+insert into platform_registry(slug, display_name) values
+  ('amazon', 'Amazon India'),
+  ('flipkart', 'Flipkart'),
+  ('croma', 'Croma'),
+  ('reliancedigital', 'Reliance Digital'),
+  ('vijaysales', 'Vijay Sales'),
+  ('jiomart', 'JioMart'),
+  ('poorvika', 'Poorvika'),
+  ('bajajelectronics', 'Bajaj Electronics')
+on conflict (slug) do update set display_name = excluded.display_name;
+
+create table if not exists daily_product_platform_prices (
+  product_id uuid not null references product_clusters(id) on delete cascade,
+  date date not null,
+  platform text not null,
+  min_price numeric(12,2),
+  max_price numeric(12,2),
+  observations_count integer not null default 0,
+  updated_at timestamptz not null default now(),
+  primary key (product_id, date, platform),
+  constraint daily_product_platform_prices_platform_fk
+    foreign key (platform) references platform_registry(slug)
+);
+
+create index if not exists idx_daily_product_platform_prices_date
+  on daily_product_platform_prices(date desc, platform);
+create index if not exists idx_daily_product_platform_prices_product
+  on daily_product_platform_prices(product_id, date desc);
+
+alter table platform_listings drop constraint if exists platform_listings_platform_check;
+alter table platform_listings add constraint platform_listings_platform_check check (
+  platform in ('amazon','flipkart','croma','reliancedigital','vijaysales','jiomart','poorvika','bajajelectronics')
+);
+
+alter table scrape_budget drop constraint if exists scrape_budget_platform_check;
+alter table scrape_budget add constraint scrape_budget_platform_check check (
+  platform in ('amazon','flipkart','croma','reliancedigital','vijaysales','jiomart','poorvika','bajajelectronics')
+);
+
+alter table platform_health drop constraint if exists platform_health_platform_check;
+alter table platform_health add constraint platform_health_platform_check check (
+  platform in ('amazon','flipkart','croma','reliancedigital','vijaysales','jiomart','poorvika','bajajelectronics')
+);
+
+alter table scheduler_plans drop constraint if exists scheduler_plans_platform_check;
+alter table scheduler_plans add constraint scheduler_plans_platform_check check (
+  platform in ('amazon','flipkart','croma','reliancedigital','vijaysales','jiomart','poorvika','bajajelectronics')
+);
+
+alter table scrape_tasks drop constraint if exists scrape_tasks_platform_check;
+alter table scrape_tasks add constraint scrape_tasks_platform_check check (
+  platform in ('amazon','flipkart','croma','reliancedigital','vijaysales','jiomart','poorvika','bajajelectronics','system')
+);
+
+insert into platform_health(platform)
+values ('vijaysales'), ('jiomart'), ('poorvika'), ('bajajelectronics')
+on conflict (platform) do nothing;
+
+insert into schema_migrations(version) values ('2026_09_platform_registry_v1')
+on conflict (version) do nothing;
+
+-- Aggregate product engagement for homepage Trending / Popular (no personal profiles).
+create table if not exists product_activity_hourly (
+  product_id uuid not null references product_clusters(id) on delete cascade,
+  event_type text not null,
+  hour_bucket timestamptz not null,
+  event_count integer not null default 0,
+  updated_at timestamptz not null default now(),
+  primary key (product_id, event_type, hour_bucket),
+  constraint product_activity_hourly_event_check check (
+    event_type in ('product_view', 'search_click', 'retailer_click')
+  ),
+  constraint product_activity_hourly_count_check check (event_count >= 0)
+);
+
+create index if not exists idx_product_activity_hourly_bucket
+  on product_activity_hourly(hour_bucket desc, event_type);
+
+create table if not exists product_activity_dedupe (
+  client_hash text not null,
+  product_id uuid not null references product_clusters(id) on delete cascade,
+  event_type text not null,
+  hour_bucket timestamptz not null,
+  created_at timestamptz not null default now(),
+  primary key (client_hash, product_id, event_type, hour_bucket)
+);
+
+insert into schema_migrations(version) values ('2026_03_product_activity_v1')
+on conflict (version) do nothing;
+
+-- NOTE (platform authority):
+-- Runtime validation uses mayabu.platforms.registry.
+-- product_search_documents already stores category + specs JSONB, so non-laptop
+-- products can be indexed without adding ram_gb/tv_size/... as top-level SQL columns.
+-- Public search remains laptop-gated in query_parser until the dedicated search task.
+-- See mayabu/search/index_readiness.py for blockers and next changes.
+-- CHECK constraints on listing/task tables remain as a defense-in-depth allowlist
+-- synchronized with the eight current retailers. Prefer extending platform_registry
+-- + application registry together; avoid adding per-retailer price columns.
+-- Follow-up: migrate remaining platform CHECKs to FK against platform_registry
+-- once scrape_tasks 'system' sentinel is modeled cleanly.
+-- Account System V1: users, sessions, email verification, password reset, wishlist.
+-- Idempotent / safe to re-apply.
+
+create table if not exists users (
+  id uuid primary key default gen_random_uuid(),
+  email text not null,
+  normalized_email text not null,
+  password_hash text not null,
+  display_name text,
+  email_verified_at timestamptz,
+  status text not null default 'active'
+    check (status in ('active', 'disabled')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  last_login_at timestamptz
+);
+
+create unique index if not exists idx_users_normalized_email
+  on users (normalized_email);
+create unique index if not exists idx_users_email
+  on users (email);
+
+create table if not exists user_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  token_hash text not null,
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  expires_at timestamptz not null,
+  revoked_at timestamptz,
+  user_agent text
+);
+
+create unique index if not exists idx_user_sessions_token_hash
+  on user_sessions (token_hash);
+create index if not exists idx_user_sessions_user_id
+  on user_sessions (user_id);
+create index if not exists idx_user_sessions_expires
+  on user_sessions (expires_at)
+  where revoked_at is null;
+
+create table if not exists email_verification_tokens (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  token_hash text not null,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null,
+  used_at timestamptz
+);
+
+create unique index if not exists idx_email_verification_token_hash
+  on email_verification_tokens (token_hash);
+create index if not exists idx_email_verification_user
+  on email_verification_tokens (user_id, created_at desc);
+
+create table if not exists password_reset_tokens (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  token_hash text not null,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null,
+  used_at timestamptz
+);
+
+create unique index if not exists idx_password_reset_token_hash
+  on password_reset_tokens (token_hash);
+create index if not exists idx_password_reset_user
+  on password_reset_tokens (user_id, created_at desc);
+
+create table if not exists user_wishlist (
+  user_id uuid not null references users(id) on delete cascade,
+  product_id uuid not null references product_clusters(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (user_id, product_id)
+);
+
+create index if not exists idx_user_wishlist_user_created
+  on user_wishlist (user_id, created_at desc);
+create index if not exists idx_user_wishlist_product
+  on user_wishlist (product_id);
+
+alter table user_wishlist
+  add column if not exists target_price numeric(12,2),
+  add column if not exists notify_on_drop boolean not null default false,
+  add column if not exists last_notified_price numeric(12,2),
+  add column if not exists last_notified_at timestamptz,
+  add column if not exists updated_at timestamptz not null default now();
+
+create index if not exists idx_user_wishlist_watch
+  on user_wishlist (product_id)
+  where notify_on_drop = true or target_price is not null;
+
+create table if not exists scheduler_heartbeats (
+  domain text primary key,
+  holder_id text not null,
+  leased_until timestamptz not null,
+  heartbeat_at timestamptz not null default now(),
+  last_successful_tick_at timestamptz,
+  jobs_scheduled_total bigint not null default 0,
+  last_error text,
+  last_tick_result text,
+  last_tick_duration_ms integer,
+  last_tick_jobs integer,
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_platform_listings_due_refresh_v2
+  on platform_listings (platform, last_successful_refresh_at, refresh_priority)
+  where listing_url is not null
+    and match_status in ('matched', 'unmatched', 'needs_review');
+
+insert into schema_migrations(version) values ('2026_09_20_account_system_v1')
+on conflict (version) do nothing;
+insert into schema_migrations(version) values ('2026_09_21_price_engine_v1')
+on conflict (version) do nothing;
+insert into schema_migrations(version) values ('2026_09_21_scheduler_tick_duration')
+on conflict (version) do nothing;

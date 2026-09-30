@@ -28,12 +28,31 @@ def create_task(
             insert into scrape_tasks(platform, task_type, query, url, native_id, priority,
                                      max_pages, max_products, metadata, idempotency_key, created_by)
             values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            on conflict (idempotency_key)
+              where idempotency_key is not null and status in ('pending','running','paused')
+            do nothing
             returning id
             """,
             (canonical_platform(platform), task_type, query, url, native_id, priority,
              max_pages, max_products, Jsonb(metadata or {}), idempotency_key, created_by),
         )
-        return str(cur.fetchone()["id"])
+        row = cur.fetchone()
+        if row:
+            return str(row["id"])
+        if not idempotency_key:
+            raise RuntimeError("Task insert did not return a row")
+        cur.execute(
+            """
+            select id from scrape_tasks
+            where idempotency_key = %s and status in ('pending','running','paused')
+            order by created_at desc limit 1
+            """,
+            (idempotency_key,),
+        )
+        existing = cur.fetchone()
+        if not existing:
+            raise RuntimeError("Idempotent task insert conflicted but active task was not found")
+        return str(existing["id"])
 
 
 def requeue_stuck_tasks(conn: Connection, max_age_minutes: int = 45, retry_delay_minutes: int = 5) -> int:
@@ -68,25 +87,83 @@ def cleanup_raw_scrape_items(conn: Connection, retention_days: int = 30) -> int:
         return int(cur.rowcount or 0)
 
 
-def claim_next_task(conn: Connection, worker_id: str, lease_minutes: int = 20) -> dict[str, Any] | None:
+def claim_next_task(
+    conn: Connection,
+    worker_id: str,
+    lease_minutes: int = 20,
+    *,
+    created_by: str | None = None,
+) -> dict[str, Any] | None:
+    """Claim the next pending task with FOR UPDATE SKIP LOCKED.
+
+    Optional ``created_by`` scopes the claim so concurrency tests cannot pick up
+    unrelated pending queue work from a shared database. Production workers leave
+    it unset and claim from the global queue.
+    """
+    with conn.cursor() as cur:
+        if created_by:
+            cur.execute(
+                """
+                with candidate as (
+                  select id from scrape_tasks
+                  where status = 'pending' and scheduled_at <= now()
+                    and created_by = %s
+                  order by priority asc, scheduled_at asc, created_at asc
+                  limit 1 for update skip locked
+                )
+                update scrape_tasks t
+                set status = 'running', attempts = attempts + 1,
+                    locked_at = now(), locked_by = %s,
+                    lease_expires_at = now() + make_interval(mins => %s),
+                    updated_at = now()
+                from candidate where t.id = candidate.id
+                returning t.*
+                """,
+                (created_by, worker_id, max(1, lease_minutes)),
+            )
+        else:
+            cur.execute(
+                """
+                with candidate as (
+                  select id from scrape_tasks
+                  where status = 'pending' and scheduled_at <= now()
+                  order by priority asc, scheduled_at asc, created_at asc
+                  limit 1 for update skip locked
+                )
+                update scrape_tasks t
+                set status = 'running', attempts = attempts + 1,
+                    locked_at = now(), locked_by = %s,
+                    lease_expires_at = now() + make_interval(mins => %s),
+                    updated_at = now()
+                from candidate where t.id = candidate.id
+                returning t.*
+                """,
+                (worker_id, max(1, lease_minutes)),
+            )
+        return cur.fetchone()
+
+
+def claim_task_by_id(
+    conn: Connection,
+    task_id: str,
+    worker_id: str,
+    lease_minutes: int = 20,
+) -> dict[str, Any] | None:
+    """Lease one known pending task. Used by bounded smoke, not the production poller."""
     with conn.cursor() as cur:
         cur.execute(
             """
-            with candidate as (
-              select id from scrape_tasks
-              where status = 'pending' and scheduled_at <= now()
-              order by priority asc, scheduled_at asc, created_at asc
-              limit 1 for update skip locked
-            )
-            update scrape_tasks t
+            update scrape_tasks
             set status = 'running', attempts = attempts + 1,
                 locked_at = now(), locked_by = %s,
                 lease_expires_at = now() + make_interval(mins => %s),
                 updated_at = now()
-            from candidate where t.id = candidate.id
-            returning t.*
+            where id = %s::uuid
+              and status = 'pending'
+              and scheduled_at <= now()
+            returning *
             """,
-            (worker_id, max(1, lease_minutes)),
+            (worker_id, max(1, lease_minutes), task_id),
         )
         return cur.fetchone()
 
@@ -149,10 +226,22 @@ def complete_task(conn: Connection, task_id: str, result: dict[str, Any] | None 
         )
 
 
-def fail_task(conn: Connection, task: dict[str, Any], error: str, result: dict[str, Any] | None = None) -> None:
+def fail_task(
+    conn: Connection,
+    task: dict[str, Any],
+    error: str,
+    result: dict[str, Any] | None = None,
+    *,
+    terminal: bool = False,
+) -> None:
     attempts = int(task.get("attempts") or 0)
     max_attempts = int(task.get("max_attempts") or 3)
-    next_status = "dead" if attempts >= max_attempts else "pending"
+    # Live verification must reach a terminal row so the PDP never spins on
+    # requeued pending tasks; listing cooldowns already gate user retries.
+    if terminal or str(task.get("task_type") or "") == "verify_listing":
+        next_status = "failed"
+    else:
+        next_status = "dead" if attempts >= max_attempts else "pending"
     backoff_minutes = min(5 * (3 ** max(attempts - 1, 0)), 360)
     with conn.cursor() as cur:
         cur.execute(

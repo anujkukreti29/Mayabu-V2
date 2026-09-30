@@ -1,10 +1,44 @@
+@import "@fontsource/dm-sans/400.css";
+@import "@fontsource/dm-sans/500.css";
+@import "@fontsource/dm-sans/600.css";
+@import "@fontsource/dm-sans/700.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
   color-scheme: light;
+  --mayabu-page: #f5f6f8;
+  --mayabu-surface: #ffffff;
+  --mayabu-surface-muted: #f0f2f5;
+  --mayabu-ink: #0b1220;
+  --mayabu-ink-soft: #243447;
+  --mayabu-ink-muted: #5c6b7a;
+  --mayabu-line: #e2e6eb;
+  --mayabu-line-strong: #c9d0d8;
+  --mayabu-brand: #334e68;
+  --mayabu-accent: #0f766e;
+  --mayabu-focus: #0f766e;
+  --mayabu-header: #0b1220;
+  --mayabu-header-h: 4rem;
+  --mayabu-radius: 0.625rem;
+  --mayabu-z-sticky: 10;
+  --mayabu-z-dock: 40;
+  --mayabu-z-nav: 50;
+  --mayabu-z-dropdown: 60;
+  --mayabu-z-overlay: 70;
+  --mayabu-z-drawer: 80;
+  --mayabu-z-skip: 100;
+  --mayabu-shadow-soft: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px -16px rgba(15, 23, 42, 0.18);
+  /* Motion tokens — restrained, purposeful */
+  --mayabu-motion-fast: 120ms;
+  --mayabu-motion-standard: 200ms;
+  --mayabu-motion-slow: 320ms;
+  --mayabu-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --mayabu-ease-inout: cubic-bezier(0.4, 0, 0.2, 1);
   font-family:
+    "DM Sans",
     Inter,
     ui-sans-serif,
     system-ui,
@@ -12,8 +46,8 @@
     BlinkMacSystemFont,
     "Segoe UI",
     sans-serif;
-  background: #f8fafc;
-  color: #0f172a;
+  background: var(--mayabu-page);
+  color: var(--mayabu-ink);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -24,7 +58,7 @@ html {
 body {
   margin: 0;
   min-width: 320px;
-  background: #f8fafc;
+  background: var(--mayabu-page);
 }
 * {
   box-sizing: border-box;
@@ -47,15 +81,18 @@ textarea {
   -webkit-tap-highlight-color: transparent;
 }
 :focus-visible {
-  outline: 3px solid #818cf8;
+  outline: 2px solid var(--mayabu-focus);
   outline-offset: 2px;
 }
 ::selection {
-  background: #c7d2fe;
-  color: #1e1b4b;
+  background: #ccfbf1;
+  color: #134e4a;
 }
 
 @media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
   *,
   *::before,
   *::after {
@@ -66,26 +103,115 @@ textarea {
   }
 }
 
+.skeleton-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    rgb(226 232 240 / 0.95) 0%,
+    rgb(241 245 249 / 0.95) 45%,
+    rgb(226 232 240 / 0.95) 90%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+.content-reveal {
+  animation: reveal-up 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-shimmer {
+    animation: none;
+    background-image: none;
+    background-color: rgb(226 232 240);
+  }
+  .content-reveal {
+    animation: none;
+  }
+}
+
 @layer components {
   .page-container {
     @apply mx-auto w-full max-w-content px-4 sm:px-6 lg:px-8;
   }
+  .commerce-container {
+    @apply mx-auto w-full max-w-commerce px-4 sm:px-6 lg:px-8;
+  }
+  .reading-container {
+    @apply mx-auto w-full max-w-reading px-4 sm:px-6 lg:px-8;
+  }
   .section-space {
-    @apply py-12 sm:py-16 lg:py-20;
+    @apply py-10 sm:py-12 lg:py-14;
+  }
+  .section-space-tight {
+    @apply py-8 sm:py-10 lg:py-12;
+  }
+  .section-anchor {
+    scroll-margin-top: calc(var(--mayabu-header-h) + 0.75rem);
   }
   .eyebrow {
-    @apply text-xs font-bold uppercase tracking-[0.18em] text-brand-600;
+    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-accent;
   }
   .section-title {
-    @apply text-2xl font-black tracking-tight text-slate-950 sm:text-3xl;
+    @apply text-[1.375rem] font-semibold tracking-tight text-ink sm:text-[1.625rem] lg:text-[1.75rem];
+  }
+  .page-title {
+    @apply text-display text-ink;
   }
   .muted {
-    @apply text-sm leading-6 text-slate-600;
+    @apply text-sm leading-6 text-ink-muted;
   }
   .surface {
-    @apply rounded-2xl border border-slate-200 bg-white shadow-soft;
+    @apply rounded-md border border-line bg-white;
+  }
+  .surface-elevated {
+    @apply rounded-md border border-line bg-white shadow-soft;
+  }
+  .surface-muted {
+    @apply rounded-md border border-line bg-surface-muted;
   }
   .price-numerals {
     font-variant-numeric: tabular-nums;
+  }
+  .nav-link {
+    @apply inline-flex min-h-10 items-center rounded-sm px-2.5 text-[13px] font-medium text-slate-300 transition duration-instant hover:bg-white/10 hover:text-white;
+  }
+  .nav-link-active {
+    @apply bg-white/10 text-white;
+  }
+  .field-control {
+    @apply h-11 w-full rounded-md border border-line bg-white px-3 text-sm text-ink outline-none transition duration-instant placeholder:text-ink-faint focus-visible:border-accent focus-visible:shadow-focus;
+  }
+  .interactive-card {
+    @apply surface transition duration-smooth ease-mayabu motion-safe:hover:-translate-y-0.5 motion-safe:hover:border-line-strong motion-safe:hover:shadow-lift;
+  }
+  .reveal-ready {
+    @apply opacity-0 translate-y-3 motion-reduce:translate-y-0 motion-reduce:opacity-100;
+  }
+  .reveal-visible {
+    @apply animate-reveal-up motion-reduce:animate-none motion-reduce:opacity-100;
+  }
+  .home-product-rail {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
+    -webkit-overflow-scrolling: touch;
+  }
+  .home-product-rail::-webkit-scrollbar {
+    height: 4px;
+  }
+  .home-product-rail::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 999px;
+  }
+  .hero-atmosphere {
+    background:
+      radial-gradient(ellipse 80% 55% at 12% -10%, rgba(15, 118, 110, 0.08), transparent 55%),
+      radial-gradient(ellipse 60% 40% at 100% 0%, rgba(51, 78, 104, 0.06), transparent 50%),
+      #ffffff;
+  }
+  .marketing-atmosphere {
+    background:
+      radial-gradient(ellipse 70% 50% at 0% 0%, rgba(15, 118, 110, 0.07), transparent 55%),
+      radial-gradient(ellipse 50% 40% at 100% 10%, rgba(11, 18, 32, 0.04), transparent 50%),
+      var(--mayabu-page);
   }
 }

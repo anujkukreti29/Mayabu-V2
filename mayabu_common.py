@@ -17,14 +17,22 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-PLATFORMS = {"amazon", "flipkart", "croma", "reliancedigital"}
+from mayabu.platforms.registry import (
+    PLATFORMS as _REGISTRY_PLATFORMS,
+    canonical_platform_slug,
+    product_source_abbrev,
+)
+
+PLATFORMS = set(_REGISTRY_PLATFORMS)
 
 CATEGORY_RULES: list[tuple[set[str], str, str]] = [
     ({"laptop", "laptops", "notebook", "notebooks", "ultrabook", "ultrabooks", "chromebook", "macbook"}, "LAP", "laptop"),
-    ({"smartphone", "smartphones", "mobile", "mobiles", "phone", "phones", "iphone", "android"}, "SMARTPH", "smartphone"),
+    ({"smartphone", "smartphones", "mobile", "mobiles", "phone", "phones", "iphone", "android phone"}, "SMARTPH", "smartphone"),
     ({"tablet", "tablets", "ipad", "android tablet"}, "TAB", "tablet"),
-    ({"television", "tv", "tvs", "smart tv", "oled tv", "qled tv", "led tv"}, "TV", "television"),
-    ({"headphone", "headphones", "earphone", "earphones", "earbuds", "tws", "neckband"}, "AUDIO", "audio"),
+    ({"television", "smart tv", "oled tv", "qled tv", "led tv", "tvs"}, "TV", "television"),
+    # Prefer specific audio categories; legacy "audio" remains a compatibility alias.
+    ({"tws", "true wireless", "earbuds", "ear buds", "airpods"}, "TWS", "tws"),
+    ({"headphone", "headphones", "over ear", "on ear", "wired headset", "wireless headphone", "earphone", "earphones", "neckband"}, "AUDIO", "headphones"),
     ({"camera", "cameras", "dslr", "mirrorless", "action camera"}, "CAM", "camera"),
     ({"refrigerator", "refrigerators", "fridge", "fridges"}, "FRIDGE", "refrigerator"),
     ({"washing machine", "washing machines", "washer", "front load", "top load"}, "WASH", "washing_machine"),
@@ -38,12 +46,30 @@ CATEGORY_RULES: list[tuple[set[str], str, str]] = [
     ({"hard disk", "hard drive", "ssd", "pen drive"}, "STORE", "storage"),
 ]
 
+# Legacy alias: historical rows may store category="audio".
+CATEGORY_ALIASES = {
+    "audio": "headphones",  # soft default; TWS preferred when title evidence is clear
+}
+
+ACCESSORY_REJECT_PATTERNS = (
+    r"\blaptop\s+(bag|sleeve|backpack|case|stand|cooler|cooling\s+pad)\b",
+    r"\btv\s+(stand|mount|wall\s+mount|unit|cover)\b",
+    r"\brefrigerator\s+(cover|stand|base|guard)\b",
+    r"\bwashing\s+machine\s+(stand|cover|base|trolley)\b",
+    r"\bcamera\s+(lens|bag|strap|tripod|filter|battery|charger)\b",
+    r"\bphone\s+(case|cover|tempered\s+glass|screen\s+guard|charger|cable)\b",
+)
+
 BRANDS = [
     "hp", "dell", "lenovo", "asus", "acer", "apple", "samsung", "msi",
     "lg", "microsoft", "toshiba", "razer", "gigabyte", "huawei", "honor",
     "infinix", "avita", "ultimus", "thomson", "chuwi", "walker", "browsebook",
     "realme", "xiaomi", "redmi", "oneplus", "motorola", "vaio", "jio", "jiobook",
     "primebook", "zebronics", "wings", "iball",
+    "sony", "vivo", "oppo", "nothing", "google", "boat", "noise", "jbl", "bose",
+    "sennheiser", "whirlpool", "godrej", "haier", "bosch", "ifb", "voltas",
+    "tcl", "hisense", "panasonic", "canon", "nikon", "fujifilm", "poco",
+    "iqoo", "nokia", "lava", "micromax", "blue star", "carrier", "daikin",
 ]
 
 BRAND_ALIASES = {
@@ -67,8 +93,14 @@ TRACKING_KEYS = {
 JUNK_TITLE_TERMS = {
     "protection plan", "warranty", "extended warranty", "resq", "oneassist",
     "laptop bag", "laptop sleeve", "laptop backpack", "laptop case", "laptop stand",
-    "cooling pad", "adapter", "charger", "mouse", "keyboard", "screen guard",
-    "skin", "sticker", "cleaning kit", "ram upgrade", "ssd enclosure",
+    "laptop charger", "cooling pad", "adapter", "charger", "mouse", "keyboard", "screen guard",
+    "screen protector", "skin", "sticker", "cleaning kit", "ram upgrade", "ssd enclosure",
+    "phone case", "phone cover", "tempered glass", "tv stand", "tv mount", "tv wall mount",
+    "tv remote", "refrigerator cover", "fridge stand", "washing machine stand",
+    "washing machine cover", "camera bag", "camera lens", "tripod", "memory card",
+    "earbud case", "ear tips", "ear cushions", "ear pads", "replacement case",
+    "charging case for", "silicone cover for", "headphone cable", "replacement cable",
+    "filter by", "sort by", "sort by brand", "clear all", "apply filters",
 }
 
 LAPTOP_POSITIVE_TERMS = {
@@ -93,6 +125,8 @@ _MULTISPC = re.compile(r"\s+")
 CPU_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bcore\s*ultra\s*(\d+)\s*(\d{3}[a-z]?)?\b", re.I), "intel_core_ultra"),
     (re.compile(r"\bcore\s*i([3579])[-\s]*(\d{4,5}[a-z]{0,3})?\b", re.I), "intel_core_i"),
+    # Acer / retail titles: "Intel Core5-210H", "Intel Core 7", "Core7-240H"
+    (re.compile(r"\b(?:intel\s*)?core\s*([3579])(?:[-\s]+|\s*)(\d{3}[a-z]{0,3})?\b", re.I), "intel_core_new"),
     (re.compile(r"\bintel\s*core\s*([357])\s*(\d{3}[a-z]?)\b", re.I), "intel_core_new"),
     (re.compile(r"\bceleron\s*(?:dual\s*core\s*)?(n?\d{4}|n\d{2})?\b", re.I), "intel_celeron"),
     (re.compile(r"\bpentium\s*(?:quad\s*core\s*)?(n?\d{4})?\b", re.I), "intel_pentium"),
@@ -168,15 +202,18 @@ def compact_space(text: str) -> str:
 
 
 def detect_category(query: str) -> tuple[str, str]:
-    q = (query or "").lower().strip()
-    for keywords, prefix, category in CATEGORY_RULES:
-        if any(kw in q for kw in keywords):
-            return prefix, category
+    from mayabu.domain.categories.registry import CATEGORY_PREFIX, detect_category_result
+
+    result = detect_category_result(query=query or "", title=query or "")
+    category = result.category
+    prefix = CATEGORY_PREFIX.get(category)
+    if prefix:
+        return prefix, category
     fallback = re.sub(r"[^A-Z0-9]", "", (query or "PROD").upper())[:6] or "PROD"
     return fallback, fallback.lower()
 
 
-def parse_price(raw: Any) -> Optional[float]:
+def parse_price(raw: Any, *, category: str | None = None) -> Optional[float]:
     if raw is None:
         return None
     text = str(raw).strip()
@@ -187,10 +224,16 @@ def parse_price(raw: Any) -> Optional[float]:
     if not m:
         return None
     try:
-        return float(m.group(0))
+        value = float(m.group(0))
     except ValueError:
         return None
+    if category:
+        from mayabu.domain.categories.registry import price_bounds_for
 
+        lo, hi = price_bounds_for(category)
+        if value < lo or value > hi:
+            return None
+    return value
 
 def parse_discount(raw: Any) -> Optional[float]:
     if raw is None:
@@ -231,13 +274,7 @@ def extract_native_id(platform: str, url: str, product_id: str | None = None) ->
     platform = canonical_platform(platform)
     if product_id:
         pid = str(product_id)
-        prefix_map = {
-            "amazon": "AMAZON",
-            "flipkart": "FLIPKART",
-            "croma": "CROMA",
-            "reliancedigital": "RELIANCE",
-        }
-        marker = prefix_map.get(platform)
+        marker = product_source_abbrev(platform)
         if marker and marker in pid:
             tail = pid.split(marker, 1)[-1]
             if tail and not re.fullmatch(r"0+\d*", tail):
@@ -267,16 +304,32 @@ def extract_native_id(platform: str, url: str, product_id: str | None = None) ->
         # Reliance frequently stores the stable SKU as the final slug number.
         m = re.search(r"-(\d{6,12})(?:$|\?)", path)
         return m.group(1) if m else None
+    if platform == "vijaysales" or "vijaysales." in host:
+        m = re.search(r"/p/(?:P?\d+/)?(\d{4,12})", path, re.I)
+        return m.group(1) if m else None
+    if platform == "jiomart" or "jiomart." in host:
+        m = re.search(r"/(\d{6,12})(?:$|\?)", path)
+        if m:
+            return m.group(1)
+        m = re.search(r"/product/[^/]+-(\d{5,12})(?:$|\?)", path, re.I)
+        return m.group(1) if m else None
+    if platform == "poorvika" or "poorvika." in host:
+        m = re.search(r"/([a-z0-9][a-z0-9\-]{4,120})/p(?:$|\?|/)", path, re.I)
+        if m:
+            return m.group(1).upper()
+        return None
+    if platform == "bajajelectronics" or "bajajelectronics." in host:
+        m = re.search(r"bajajelectronics\.com/([a-z0-9][a-z0-9\-]{3,160})(?:$|\?)", url, re.I)
+        if m:
+            slug = m.group(1).lower()
+            if slug not in {"search", "cart", "login", "category", "categories", "brands"}:
+                return slug.upper()
+        return None
     return None
 
 
 def canonical_platform(source: str) -> str:
-    s = (source or "").strip().lower().replace(" ", "")
-    if s in {"reliance", "reliancedigital", "reliance_digital"}:
-        return "reliancedigital"
-    if s in {"amazon", "flipkart", "croma"}:
-        return s
-    return s or "unknown"
+    return canonical_platform_slug(source)
 
 
 def listing_id(platform: str, native_id: str | None, url: str, title: str = "") -> str:
@@ -290,12 +343,7 @@ def listing_id(platform: str, native_id: str | None, url: str, title: str = "") 
 
 
 def product_source_id(category_prefix: str, platform: str, native_id: str | None, counter: int) -> str:
-    abbrev = {
-        "amazon": "AMAZON",
-        "flipkart": "FLIPKART",
-        "croma": "CROMA",
-        "reliancedigital": "RELIANCE",
-    }.get(canonical_platform(platform), platform.upper())
+    abbrev = product_source_abbrev(platform)
     suffix = str(native_id).upper() if native_id else f"{counter:04d}"
     return f"{category_prefix}{abbrev}{suffix}"
 
@@ -331,154 +379,144 @@ def _to_storage_gb(value: str, unit: str) -> int:
 def normalize_specs(specs: dict[str, Any] | None) -> dict[str, Any]:
     """Normalize extracted specs to stable types used by matching/search."""
     out = dict(specs or {})
-    for key in ("ram_gb", "storage_gb", "generation"):
+    for key in (
+        "ram_gb",
+        "storage_gb",
+        "generation",
+        "star_rating",
+        "rpm",
+        "refresh_rate_hz",
+        "battery_mah",
+        "camera_mp",
+    ):
         value = out.get(key)
         if value is None or value == "":
-            out[key] = None
+            if key in out:
+                out[key] = None
             continue
         try:
             out[key] = int(float(value))
         except (TypeError, ValueError):
             out[key] = None
-    value = out.get("screen_inch")
-    if value is not None and value != "":
-        try:
-            out["screen_inch"] = round(float(value), 1)
-        except (TypeError, ValueError):
-            out["screen_inch"] = None
+    for key in (
+        "screen_inch",
+        "display_size_inch",
+        "screen_size_inch",
+        "capacity_l",
+        "capacity_kg",
+        "battery_hours",
+        "megapixels",
+    ):
+        value = out.get(key)
+        if value is not None and value != "":
+            try:
+                out[key] = round(float(value), 1)
+            except (TypeError, ValueError):
+                out[key] = None
     for key in ("model_codes", "cpu_models"):
         value = out.get(key)
         if value is None:
             out[key] = []
         elif isinstance(value, (list, tuple, set)):
-            out[key] = sorted({str(v).strip().upper() if key == "model_codes" else str(v).strip().lower() for v in value if str(v).strip()})
+            out[key] = sorted(
+                {
+                    str(v).strip().upper() if key == "model_codes" else str(v).strip().lower()
+                    for v in value
+                    if str(v).strip()
+                }
+            )
         else:
             text = str(value).strip()
             out[key] = [text.upper() if key == "model_codes" else text.lower()] if text else []
-    for key in ("brand", "category", "family", "cpu_series", "gpu"):
+    for key in (
+        "brand",
+        "category",
+        "family",
+        "cpu_series",
+        "gpu",
+        "chipset",
+        "network_generation",
+        "panel_type",
+        "resolution",
+        "smart_platform",
+        "door_type",
+        "frost_type",
+        "compressor_type",
+        "load_type",
+        "automation_type",
+        "form_factor",
+        "connectivity",
+        "codec",
+        "bluetooth_version",
+        "camera_type",
+        "sensor_format",
+        "mount",
+        "kit_lens",
+        "color",
+        "series",
+    ):
         if out.get(key) is not None:
             out[key] = str(out[key]).strip().lower() or None
+    if "anc" in out and out["anc"] is not None:
+        out["anc"] = bool(out["anc"])
+    if "body_only" in out and out["body_only"] is not None:
+        out["body_only"] = bool(out["body_only"])
     return out
 
-
 def extract_specs(title: str, category: str = "laptop") -> dict[str, Any]:
-    text = ascii_fold(title or "")
-    tl = text.lower()
-    brand = resolve_brand(text)
+    """Dispatch to category adapters; laptop behavior remains the production baseline."""
+    from mayabu.domain.categories.registry import extract_category_specs
 
-    ram_hits: list[int] = []
-    storage_hits: list[int] = []
-    for m in RAM_RE.finditer(text):
-        value = int(m.group(1))
-        if value in {2, 3, 4, 6, 8, 10, 12, 16, 18, 24, 32, 36, 48, 64, 96, 128}:
-            # Avoid screen sizes like 16 inch accidentally marked as RAM by requiring GB token.
-            ram_hits.append(value)
-    ram = max(ram_hits) if ram_hits else None
-
-    for m in STORAGE_RE.finditer(text):
-        gb = _to_storage_gb(m.group(1), m.group(2))
-        if gb >= 32 and gb != ram:
-            storage_hits.append(gb)
-    storage_gb = max(storage_hits) if storage_hits else None
-
-    screen = None
-    sm = SCREEN_RE.search(text)
-    if sm:
-        if sm.group(1):
-            screen = round(float(sm.group(1)), 1)
-        elif sm.group(2):
-            screen = round(float(sm.group(2)) / 2.54, 1)
-
-    gen = None
-    gm = GEN_RE.search(text)
-    if gm:
-        try:
-            gen = int(gm.group(1))
-        except ValueError:
-            gen = None
-
-    cpu_series = None
-    cpu_models: set[str] = set()
-    for pattern, label in CPU_PATTERNS:
-        m = pattern.search(text)
-        if not m:
-            continue
-        groups = [g for g in m.groups() if g]
-        normalized_groups = [re.sub(r"\s+", "", g.lower()) for g in groups]
-        cpu_series = label
-        if normalized_groups:
-            cpu_series = label + ":" + ":".join(normalized_groups[:2])
-            cpu_models.add(":".join([label] + normalized_groups))
-        break
-
-    model_codes: set[str] = set()
-    for m in MODEL_CODE_RE.finditer(text):
-        val = next((g for g in m.groups() if g), "")
-        val = val.upper().replace(" ", "")
-        if len(val) < 5:
-            continue
-        # Avoid generic CPU-only codes; CPU models are handled separately.
-        if re.fullmatch(r"I[3579]\d{4,5}[A-Z]*", val):
-            continue
-        if val.lower() in {"windows11", "office2024"}:
-            continue
-        model_codes.add(val)
-
-    gpu = None
-    gm2 = GPU_RE.search(text)
-    if gm2:
-        gpu = re.sub(r"\s+", "", gm2.group(1).lower())
-
-    family = None
-    for fp in FAMILY_PATTERNS:
-        fm = re.search(fp, tl)
-        if fm:
-            # Avoid false family extraction from adjacent specs such as
-            # "IdeaPad 16GB" or "Pavilion 15.6 inch".
-            tail = tl[fm.end(1):fm.end(1) + 10]
-            if re.match(r"\s*(?:\.\d+\s*)?(?:gb|tb|inch|inches|cm)\b", tail):
-                continue
-            family = re.sub(r"\s+", "_", fm.group(1).strip().lower())
-            break
-
-    return {
-        "brand": brand,
-        "category": category,
-        "family": family,
-        "model_codes": sorted(model_codes),
-        "cpu_series": cpu_series,
-        "cpu_models": sorted(cpu_models),
-        "gpu": gpu,
-        "ram_gb": ram,
-        "storage_gb": storage_gb,
-        "screen_inch": screen,
-        "generation": gen,
-    }
+    return extract_category_specs(title, category=category)
 
 
 def looks_like_real_product(title: str, category: str) -> bool:
+    from mayabu.domain.identity_quality import has_sufficient_product_identity
+
     t = (title or "").lower()
-    if not t or len(t) < 5:
+    if not t or len(t) < 3:
+        return False
+    if category == "accessory":
         return False
     if any(term in t for term in JUNK_TITLE_TERMS):
         return False
+    if not has_sufficient_product_identity(title, category):
+        return False
     if category == "laptop":
-        return any(term in t for term in LAPTOP_POSITIVE_TERMS)
+        if any(term in t for term in LAPTOP_POSITIVE_TERMS):
+            return True
+        # Many retailers omit the word "laptop" but still list brand + RAM/CPU.
+        if resolve_brand(title) and (
+            re.search(r"\b\d{1,2}\s*gb\b", t)
+            or re.search(r"\b(i[3579]|ryzen|celeron|pentium|core\s*ultra)\b", t)
+        ):
+            return True
+        return False
     return True
 
-
 def normalize_raw_listing(raw: dict[str, Any], platform_hint: str | None = None, query: str = "", observed_at: str | None = None) -> Optional[dict[str, Any]]:
+    from mayabu.domain.categories.registry import CATEGORY_PREFIX, detect_category_result
+
     platform = canonical_platform(platform_hint or raw.get("platform") or raw.get("source") or "unknown")
     title = compact_space(str(raw.get("title") or ""))
-    prefix, category = detect_category(query or raw.get("query") or title)
-    if not looks_like_real_product(title, category):
+    detection = detect_category_result(
+        query=query or str(raw.get("query") or ""),
+        title=title,
+        breadcrumbs=str(raw.get("breadcrumbs") or ""),
+        url=str(raw.get("link") or raw.get("url") or raw.get("product_url") or ""),
+        structured_category=str(raw.get("structured_category") or raw.get("category") or ""),
+    )
+    category = detection.category
+    prefix = CATEGORY_PREFIX.get(category) or "UNK"
+    if category == "accessory" or not looks_like_real_product(title, category):
         return None
     url = raw.get("link") or raw.get("url") or raw.get("product_url") or ""
     norm_url = normalize_url(str(url))
     native = raw.get("native_id") or extract_native_id(platform, str(url), raw.get("productId"))
     lid = raw.get("listing_id") or listing_id(platform, native, norm_url, title)
-    price = raw.get("price") if "price" in raw else parse_price(raw.get("currentPrice"))
-    mrp = raw.get("mrp") if "mrp" in raw else parse_price(raw.get("maxRetailPrice"))
+    # Category-aware price parse when possible
+    price = raw.get("price") if "price" in raw else parse_price(raw.get("currentPrice"), category=category if category != "unknown" else None)
+    mrp = raw.get("mrp") if "mrp" in raw else parse_price(raw.get("maxRetailPrice"), category=category if category != "unknown" else None)
     discount = raw.get("discount_pct") if "discount_pct" in raw else parse_discount(raw.get("discount"))
     if discount is None and price and mrp and mrp > price:
         discount = round((1.0 - float(price) / float(mrp)) * 100, 2)
@@ -488,6 +526,8 @@ def normalize_raw_listing(raw: dict[str, Any], platform_hint: str | None = None,
         "source": platform,
         "query": query or raw.get("query") or "",
         "category": category,
+        "category_confidence": detection.confidence,
+        "category_evidence": list(detection.evidence),
         "category_prefix": prefix,
         "native_id": str(native).upper() if native else None,
         "listing_id": lid,

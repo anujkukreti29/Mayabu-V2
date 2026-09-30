@@ -102,7 +102,10 @@ def _request_price_verification_uncached(product_id: str, mode: str = "best_offe
         "tasks": tasks,
         "skipped": skipped,
         "estimated_seconds": settings.live_verify_estimated_seconds,
-        "message": "Cached prices remain visible while Mayabu verifies selected store listings.",
+        "message": "Current listed prices stay visible while Mayabu checks known store pages.",
+        "selected_count": len(selected),
+        "due_count": len(due),
+        "skipped_count": len(skipped),
     }
 
 

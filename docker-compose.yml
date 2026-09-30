@@ -44,11 +44,15 @@ services:
       DATABASE_URL: postgresql://mayabu:${MAYABU_POSTGRES_PASSWORD:-mayabu_dev_password}@postgres:5432/mayabu
       REDIS_URL: redis://redis:6379/0
       MAYABU_API_HOST: 0.0.0.0
-      MAYABU_ENV: production
+      MAYABU_ENV: ${MAYABU_ENV:-staging}
+      MAYABU_ALLOW_INSECURE_LOCAL: ${MAYABU_ALLOW_INSECURE_LOCAL:-1}
+      MAYABU_ADMIN_TOKEN: ${MAYABU_ADMIN_TOKEN:-local-compose-admin-token}
       MAYABU_API_WORKERS: ${MAYABU_API_WORKERS:-2}
       MAYABU_API_THREADPOOL_TOKENS: ${MAYABU_API_THREADPOOL_TOKENS:-40}
       MAYABU_ENABLE_REDIS_CACHE: "true"
       MAYABU_ENABLE_REDIS_RATE_LIMIT: "true"
+      MAYABU_AUTH_EMAIL_PROVIDER: ${MAYABU_AUTH_EMAIL_PROVIDER:-console}
+      MAYABU_AUTH_PUBLIC_BASE_URL: ${MAYABU_AUTH_PUBLIC_BASE_URL:-http://127.0.0.1:5173}
     ports:
       - "8000:8000"
     depends_on:
@@ -75,6 +79,9 @@ services:
       MAYABU_ENABLE_REDIS_RATE_LIMIT: "true"
       MAYABU_SCRAPER_DISTRIBUTED_SLOT_TTL_SECONDS: ${MAYABU_SCRAPER_DISTRIBUTED_SLOT_TTL_SECONDS:-180}
       MAYABU_SCRAPER_DISTRIBUTED_SLOT_WAIT_SECONDS: ${MAYABU_SCRAPER_DISTRIBUTED_SLOT_WAIT_SECONDS:-5}
+      # Non-root container Chromium typically needs no-sandbox; document security tradeoff.
+      MAYABU_SCRAPER_CHROMIUM_NO_SANDBOX: ${MAYABU_SCRAPER_CHROMIUM_NO_SANDBOX:-1}
+      MAYABU_SCRAPER_CHROMIUM_DISABLE_DEV_SHM: ${MAYABU_SCRAPER_CHROMIUM_DISABLE_DEV_SHM:-1}
     depends_on:
       postgres:
         condition: service_healthy
@@ -86,6 +93,29 @@ services:
     restart: unless-stopped
     volumes:
       - ./artifacts:/app/artifacts
+      - ./logs:/app/logs
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    profiles: ["app", "scheduler"]
+    command: ["python", "-m", "mayabu.scheduler"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://mayabu:${MAYABU_POSTGRES_PASSWORD:-mayabu_dev_password}@postgres:5432/mayabu
+      REDIS_URL: redis://redis:6379/0
+      MAYABU_SCHEDULER_ENABLED: ${MAYABU_SCHEDULER_ENABLED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: "0.25"
+    restart: unless-stopped
+    volumes:
       - ./logs:/app/logs
 
   maintenance:

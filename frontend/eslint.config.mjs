@@ -12,6 +12,7 @@ export default tseslint.config(
       ".react-router/**",
       "coverage/**",
       "playwright-report/**",
+      "playwright-report-real/**",
       "test-results/**",
       "*.config.mjs",
       "scripts/*.mjs",

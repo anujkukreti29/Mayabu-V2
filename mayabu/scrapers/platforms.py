@@ -4,15 +4,11 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+from mayabu.platforms.registry import PLATFORM_HOSTS, SUPPORTED_PLATFORMS, display_name
 from mayabu_common import normalize_url
 
-PLATFORM_HOSTS: dict[str, tuple[str, ...]] = {
-    "amazon": ("amazon.in", "www.amazon.in"),
-    "flipkart": ("flipkart.com", "www.flipkart.com"),
-    "croma": ("croma.com", "www.croma.com"),
-    "reliancedigital": ("reliancedigital.in", "www.reliancedigital.in"),
-}
-SUPPORTED_PLATFORMS = frozenset(PLATFORM_HOSTS)
+# Re-export registry maps so existing imports keep working.
+__all__ = ["PLATFORM_HOSTS", "SUPPORTED_PLATFORMS", "detect_platform", "validate_product_url"]
 
 
 def detect_platform(url: str) -> str:
@@ -23,7 +19,8 @@ def detect_platform(url: str) -> str:
     for platform, hosts in PLATFORM_HOSTS.items():
         if any(host == allowed or host.endswith("." + allowed) for allowed in hosts):
             return platform
-    raise ValueError("Unsupported product URL. Use Amazon India, Flipkart, Croma, or Reliance Digital.")
+    names = ", ".join(display_name(p) for p in sorted(SUPPORTED_PLATFORMS))
+    raise ValueError(f"Unsupported product URL. Use one of: {names}.")
 
 
 def validate_product_url(platform: str, url: str) -> str:

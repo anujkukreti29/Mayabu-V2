@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import json
 
+from mayabu.platforms.registry import SUPPORTED_PLATFORMS
 from mayabu.scrapers.capacity import scraper_capacity
 from mayabu_refresh.runner import run_refresh_scraper
 
@@ -28,7 +29,7 @@ def main() -> None:
     parser.add_argument(
         "--platform",
         required=True,
-        choices=["amazon", "flipkart", "croma", "reliancedigital"],
+        choices=sorted(SUPPORTED_PLATFORMS),
     )
     parser.add_argument("--url", required=True)
     parser.add_argument(

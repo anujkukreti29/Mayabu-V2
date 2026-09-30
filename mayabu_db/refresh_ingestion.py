@@ -21,6 +21,7 @@ class RefreshIngestStats:
     observations_added: int = 0
     listings_updated: int = 0
     anomaly_count: int = 0
+    last_event_type: str | None = None
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -31,6 +32,7 @@ class RefreshIngestStats:
             "observations_added": self.observations_added,
             "listings_updated": self.listings_updated,
             "anomaly_count": self.anomaly_count,
+            "last_event_type": self.last_event_type,
             "errors": self.errors[:20],
         }
 
@@ -111,14 +113,37 @@ def validate_refresh_result(
     # v4.3 refresh scrapers are price-only. Title is maintained by discovery/enrichment
     # and is not required for a valid price refresh.
     price = result.current_price
-    out_of_stock_without_price = allow_out_of_stock_without_price and result.stock_status == "out_of_stock" and price is None
+    explicit_oos = result.stock_status == "out_of_stock" and result.page_status == "success"
+    out_of_stock_without_price = (
+        price is None
+        and result.stock_status == "out_of_stock"
+        and (allow_out_of_stock_without_price or explicit_oos)
+    )
     if price is None and not out_of_stock_without_price:
         flags.append({"code": "missing_price", "severity": "high", "message": "Refresh result has no current price", "evidence": {"raw_price_text": result.raw_price_text}})
-    elif price is not None and (listing.get("category") == "laptop" or (listing.get("category") or "unknown") == "unknown"):
-        if price < 5000:
-            flags.append({"code": "price_too_low", "severity": "high", "message": "Refresh price is suspiciously low for a laptop", "evidence": {"price": price}})
-        if price > 600000:
-            flags.append({"code": "price_too_high", "severity": "medium", "message": "Refresh price is suspiciously high for a laptop", "evidence": {"price": price}})
+    elif price is not None:
+        from mayabu.domain.categories.registry import price_bounds_for
+
+        category = str(listing.get("category") or "unknown")
+        lo, hi = price_bounds_for(category if category not in {"unknown", "accessory"} else None)
+        if price < lo:
+            flags.append(
+                {
+                    "code": "price_too_low",
+                    "severity": "high",
+                    "message": f"Refresh price is suspiciously low for {category}",
+                    "evidence": {"price": price, "min": lo, "category": category},
+                }
+            )
+        if price > hi:
+            flags.append(
+                {
+                    "code": "price_too_high",
+                    "severity": "medium",
+                    "message": f"Refresh price is suspiciously high for {category}",
+                    "evidence": {"price": price, "max": hi, "category": category},
+                }
+            )
 
     if result.mrp is not None and price is not None and result.mrp < price:
         flags.append({"code": "mrp_below_price", "severity": "medium", "message": "MRP is lower than current price", "evidence": {"price": price, "mrp": result.mrp}})
@@ -130,8 +155,24 @@ def validate_refresh_result(
         old = None
     if old and price and price < old * 0.30:
         flags.append({"code": "suspicious_price_drop", "severity": "high", "message": "Refresh price dropped by more than 70 percent", "evidence": {"old_price": float(old), "new_price": price}})
+    if old and price and price > old * 3.0 and price > max(old + 5_000, old * 2.5):
+        flags.append(
+            {
+                "code": "suspicious_price_spike",
+                "severity": "high",
+                "message": "Refresh price spiked more than 3x recent trustworthy price",
+                "evidence": {"old_price": float(old), "new_price": price},
+            }
+        )
 
-    fatal_codes = {"invalid_platform_url", "missing_price", "price_too_low", "suspicious_price_drop"}
+    fatal_codes = {
+        "invalid_platform_url",
+        "missing_price",
+        "price_too_low",
+        "suspicious_price_drop",
+        "suspicious_price_spike",
+        "price_too_high",
+    }
     ok = not any(flag["code"] in fatal_codes or flag["severity"] == "critical" for flag in flags)
     return ok, flags
 
@@ -185,10 +226,67 @@ def apply_refresh_result(
         return stats
 
     observed_at = _utc_now()
-    # Scheduled refresh keeps the existing stock value. Explicit live verification
-    # may update it only when the verifier obtained a meaningful status.
+    from mayabu_refresh.stock import resolve_stock_for_ingest
+
     detected_stock = _db_stock_status(result.stock_status)
-    stock_status = detected_stock if update_stock and detected_stock != "unknown" else _db_stock_status(listing.get("stock_status"))
+    listing_stock = _db_stock_status(listing.get("stock_status"))
+    # Map challenge-like page statuses so stock resolver preserves prior state.
+    page_for_stock = result.page_status
+    if (result.stock_reason or "") in {
+        "challenge_or_captcha",
+        "login_wall",
+        "location_required",
+        "weak_availability_phrase",
+        "no_stock_evidence",
+        "ambiguous_oos_not_published",
+    }:
+        # Keep page_status as-is; resolver uses reason via detected state path.
+        pass
+    stock_status, stock_decision = resolve_stock_for_ingest(
+        detected=detected_stock,
+        previous=listing_stock,
+        page_status=page_for_stock,
+        update_stock=update_stock,
+        reason=getattr(result, "stock_reason", None),
+        confidence=getattr(result, "stock_confidence", None),
+    )
+    try:
+        from mayabu.monitoring import instrumentation as metrics
+
+        platform_label = canonical_platform(listing.get("platform") or "") or "unknown"
+        metrics.STOCK_CLASSIFICATION.inc(platform=platform_label, state=stock_status)
+        if stock_status == "unknown" or stock_decision in {
+            "ambiguous_oos_not_published",
+            "oos_insufficient_evidence",
+            "fallback_unknown",
+        }:
+            metrics.STOCK_UNCERTAIN.inc(platform=platform_label)
+        if listing_stock != stock_status:
+            metrics.STOCK_TRANSITION.inc(
+                platform=platform_label,
+                transition=f"{listing_stock}_to_{stock_status}",
+            )
+        if detected_stock == "out_of_stock" and listing_stock == "in_stock":
+            metrics.STOCK_CONFIRMATION_RETRY.inc(
+                platform=platform_label,
+                result=("accepted" if stock_status == "out_of_stock" else "preserved"),
+            )
+    except Exception:
+        pass
+    if stock_decision.startswith("preserve") or stock_decision == "ambiguous_oos_not_published":
+        flags = list(flags) + [
+            {
+                "code": "stock_preserved",
+                "severity": "low",
+                "message": f"Stock not updated ({stock_decision})",
+                "evidence": {
+                    "detected": detected_stock,
+                    "previous": listing_stock,
+                    "reason": getattr(result, "stock_reason", None),
+                    "decision": stock_decision,
+                },
+            }
+        ]
     observed_price = result.current_price if result.current_price is not None else listing.get("current_price")
     observed_mrp = result.mrp if result.mrp is not None else listing.get("current_mrp")
     title = listing.get("title") or result.title or ""
@@ -222,6 +320,7 @@ def apply_refresh_result(
             elif previous is not None:
                 event_type = "unchanged"
 
+        stats.last_event_type = event_type
         cur.execute(
             """
             update platform_listings
@@ -238,7 +337,7 @@ def apply_refresh_result(
                 last_refresh_error = null,
                 quality_flags = %s,
                 last_price_change_at = case
-                  when %s is not null and current_price is distinct from %s then %s
+                  when %s::numeric is not null and current_price is distinct from %s::numeric then %s
                   else last_price_change_at end,
                 updated_at = now()
             where id = %s
@@ -302,5 +401,99 @@ def apply_refresh_result(
         if product_id:
             refresh_daily_product_price(conn, product_id, date_expr=observed_at)
         invalidate_price_caches(product_id, category=listing.get("category"), event_type=event_type)
+        if product_id and event_type in {"drop", "back_in_stock", "out_of_stock", "initial"}:
+            from mayabu.domain.price_watch import evaluate_watches
+
+            prev_price = None
+            if prev and prev.get("price") is not None:
+                try:
+                    prev_price = float(prev["price"])
+                except (TypeError, ValueError):
+                    prev_price = None
+            evaluate_watches(
+                conn,
+                str(product_id),
+                float(result.current_price) if result.current_price is not None else None,
+                event_type,
+                previous_price=prev_price,
+                stock_status=stock_status,
+                purchasable=stock_status == "in_stock" and result.current_price is not None,
+            )
+            # New tracked low: current in-stock price below prior Mayabu tracked minimum
+            # with adequate history. Idempotent via fingerprint.
+            if (
+                stock_status == "in_stock"
+                and result.current_price is not None
+                and float(result.current_price) > 0
+            ):
+                prior_low = _prior_tracked_low(conn, str(product_id))
+                current = float(result.current_price)
+                if (
+                    prior_low is not None
+                    and prior_low > 0
+                    and current < prior_low
+                    and _tracked_history_adequate(conn, str(product_id))
+                ):
+                    evaluate_watches(
+                        conn,
+                        str(product_id),
+                        current,
+                        "new_tracked_low",
+                        previous_price=prior_low,
+                        stock_status=stock_status,
+                        purchasable=True,
+                    )
+        if product_id and listing.get("image_url"):
+            try:
+                from mayabu.catalog.product_images import upsert_product_images
+
+                upsert_product_images(
+                    conn,
+                    product_id=str(product_id),
+                    urls=[str(listing["image_url"])],
+                    listing_id=listing_uuid,
+                    source_platform=platform,
+                )
+            except Exception:
+                pass
     stats.valid += 1
     return stats
+
+
+def _prior_tracked_low(conn, product_id: str) -> float | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select min(best_price) as low
+            from daily_product_prices
+            where product_id = %s::uuid
+              and best_price is not null
+              and best_price > 0
+              and date < current_date
+            """,
+            (product_id,),
+        )
+        row = cur.fetchone()
+        if not row or row.get("low") is None:
+            return None
+        try:
+            return float(row["low"])
+        except (TypeError, ValueError):
+            return None
+
+
+def _tracked_history_adequate(conn, product_id: str, *, min_obs: int = 7, min_days: int = 14) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select count(*)::int as obs_count,
+                   count(distinct date)::int as day_count
+            from daily_product_prices
+            where product_id = %s::uuid
+              and best_price is not null
+              and best_price > 0
+            """,
+            (product_id,),
+        )
+        row = cur.fetchone() or {}
+        return int(row.get("obs_count") or 0) >= min_obs and int(row.get("day_count") or 0) >= min_days

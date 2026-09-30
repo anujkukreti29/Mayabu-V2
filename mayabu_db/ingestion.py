@@ -7,7 +7,7 @@ from psycopg import Connection
 
 from mayabu_common import canonical_platform, normalize_raw_listing
 from mayabu_db.matching import choose_match
-from mayabu_db.quality import fatal_listing_flags, validate_listing
+from mayabu_db.quality import evaluate_listing, fatal_listing_flags, should_persist_price
 from mayabu_db.repository import (
     add_anomaly,
     add_review_item,
@@ -95,6 +95,8 @@ def ingest_listing(
     run_id: str | None = None,
     task_id: str | None = None,
     observed_at: str | None = None,
+    preferred_product_id: str | None = None,
+    allow_new_product: bool = True,
 ) -> tuple[bool, IngestStats]:
     """
     Ingest one normalized listing inside an active transaction.
@@ -142,7 +144,8 @@ def ingest_listing(
         stats.anomaly_count += 1
         return False, stats
 
-    flags = validate_listing(listing)
+    quality = evaluate_listing(listing)
+    flags = [f.as_dict() for f in quality.flags]
 
     insert_raw_item(
         conn,
@@ -152,12 +155,12 @@ def ingest_listing(
         query,
         raw,
         listing.get("listing_id"),
-        parse_status="valid",
-        parse_error=None,
+        parse_status="valid" if quality.decision != "rejected" else "invalid",
+        parse_error=None if quality.decision != "rejected" else ",".join(quality.reasons),
     )
 
     fatal = fatal_listing_flags(flags)
-    if fatal:
+    if quality.decision == "rejected" or fatal:
         stats.invalid += 1
 
         add_anomaly(
@@ -168,7 +171,9 @@ def ingest_listing(
             platform=platform,
             run_id=run_id,
             evidence={
-                "flags": fatal,
+                "flags": fatal or flags,
+                "decision": quality.decision,
+                "reasons": list(quality.reasons),
                 "title": listing.get("title"),
                 "listing_id": listing.get("listing_id"),
                 "url": listing.get("url"),
@@ -185,36 +190,125 @@ def ingest_listing(
         if existing and existing.get("product_id")
         else None
     )
+    if product_id:
+        from mayabu.domain.categories.registry import hard_conflicts as category_hard_conflicts
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "select category, specs from product_clusters where id = %s::uuid",
+                (product_id,),
+            )
+            product_row = cur.fetchone()
+        product_specs = {}
+        if product_row and isinstance(product_row.get("specs"), dict):
+            product_specs = product_row["specs"]
+        listing_specs = listing.get("specs") if isinstance(listing.get("specs"), dict) else {}
+        conflicts = category_hard_conflicts(
+            str((product_row or {}).get("category") or listing.get("category") or ""),
+            product_specs,
+            listing_specs,
+        )
+        if conflicts:
+            product_id = None
 
     confidence = 1000.0 if product_id else 0.0
     method = "listing_id_exact" if product_id else "new_product"
     evidence: dict[str, Any] = {"listing_id": listing["listing_id"]} if product_id else {}
     needs_review = False
 
+    # Low-confidence / unknown category must not drive aggressive exact matching.
+    category = str(listing.get("category") or "unknown")
+    cat_conf = str(listing.get("category_confidence") or "unknown")
+    force_review = category in {"unknown", "accessory"} or cat_conf in {"low", "unknown"}
+
     if not product_id:
         candidates = list_candidate_products(conn, listing)
-        product_id, confidence, method, evidence, needs_review = choose_match(
-            listing,
-            candidates,
-        )
+        # Targeted overlap: try the trusted anchor first before creating a new cluster.
+        if preferred_product_id:
+            preferred = [
+                row for row in candidates if str(row.get("id")) == str(preferred_product_id)
+            ]
+            if not preferred:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        select id, category, brand, canonical_title, title_norm, specs
+                        from product_clusters
+                        where id = %s::uuid
+                        """,
+                        (str(preferred_product_id),),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        preferred = [dict(row)]
+            if preferred:
+                pid, conf, meth, evid, review = choose_match(listing, preferred)
+                if pid and not review:
+                    product_id, confidence, method, evidence, needs_review = (
+                        pid,
+                        conf,
+                        "anchor_preferred_exact",
+                        {**(evid or {}), "anchor_product_id": str(preferred_product_id)},
+                        False,
+                    )
+                else:
+                    product_id, confidence, method, evidence, needs_review = choose_match(
+                        listing,
+                        candidates,
+                    )
+            else:
+                product_id, confidence, method, evidence, needs_review = choose_match(
+                    listing,
+                    candidates,
+                )
+        else:
+            product_id, confidence, method, evidence, needs_review = choose_match(
+                listing,
+                candidates,
+            )
+        if force_review and product_id and method != "listing_id_exact":
+            needs_review = True
+            method = "needs_manual_review"
+            evidence = {**evidence, "reason": "low_category_confidence"}
+
+        if preferred_product_id and product_id and str(product_id) != str(preferred_product_id):
+            evidence = {
+                "reason": "overlap_different_product",
+                "anchor_product_id": str(preferred_product_id),
+            }
+            product_id = None
+            needs_review = True
+            method = "needs_manual_review"
 
         if product_id and not needs_review:
             stats.products_matched += 1
 
         elif product_id and needs_review:
-            # Keep listing unmerged until review approves. This protects trust.
             method = "needs_manual_review"
 
         else:
-            variant_key = build_variant_key(
-                listing.get("specs") or {},
-                listing.get("title_norm"),
-            )
-            product_id = create_product(conn, listing, variant_key)
-            stats.products_created += 1
-            confidence = 0.0
-            method = "new_product"
-            evidence = {"variant_key": variant_key} if variant_key else {}
+            if force_review or not allow_new_product:
+                # Overlap searches must not mint a new single-store product when
+                # the anchored exact match is not accepted.
+                product_id = None
+                confidence = 0.0
+                method = "needs_manual_review"
+                evidence = {
+                    "reason": "low_category_confidence" if force_review else "overlap_not_exact_anchor",
+                    "anchor_product_id": str(preferred_product_id or ""),
+                    "category": category,
+                }
+                needs_review = True
+            else:
+                variant_key = build_variant_key(
+                    listing.get("specs") or {},
+                    listing.get("title_norm"),
+                )
+                product_id = create_product(conn, listing, variant_key)
+                stats.products_created += 1
+                confidence = 0.0
+                method = "new_product"
+                evidence = {"variant_key": variant_key} if variant_key else {}
 
     listing_product_id = product_id if method != "needs_manual_review" else None
 
@@ -240,7 +334,7 @@ def ingest_listing(
     elif listing_product_id:
         merge_product_specs(conn, listing_product_id, listing)
 
-    if insert_price_observation(
+    if should_persist_price(quality) and insert_price_observation(
         conn,
         listing_uuid,
         listing["listing_id"],
@@ -263,6 +357,20 @@ def ingest_listing(
                 listing_product_id,
                 date_expr=listing.get("scraped_at"),
             )
+    elif not should_persist_price(quality) and listing.get("price") is not None:
+        # Keep listing metadata; do not overwrite historical good prices with bad ones.
+        add_anomaly(
+            conn,
+            "medium",
+            "price_not_persisted",
+            "Price failed quality gate and was not written",
+            platform=platform,
+            product_id=listing_product_id,
+            listing_id=listing_uuid,
+            run_id=run_id,
+            evidence={"reasons": list(quality.reasons), "price": listing.get("price")},
+        )
+        stats.anomaly_count += 1
 
     if listing_product_id:
         stats.affected_product_ids.add(str(listing_product_id))
@@ -293,6 +401,8 @@ def ingest_records(
     run_id: str | None = None,
     task_id: str | None = None,
     observed_at: str | None = None,
+    preferred_product_id: str | None = None,
+    allow_new_product: bool = True,
 ) -> IngestStats:
     """
     Ingest a batch safely.
@@ -314,6 +424,8 @@ def ingest_records(
                     run_id=run_id,
                     task_id=task_id,
                     observed_at=observed_at,
+                    preferred_product_id=preferred_product_id,
+                    allow_new_product=allow_new_product,
                 )
 
         except Exception as exc:

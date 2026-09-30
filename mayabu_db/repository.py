@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from psycopg import Connection
+from psycopg.errors import UndefinedTable
 from psycopg.types.json import Jsonb
 
 from mayabu.domain.matching import assess_product_match
@@ -384,11 +385,15 @@ def get_listing_by_public_id(
 def create_product(
     conn: Connection, listing: dict[str, Any], variant_key: str | None
 ) -> str:
+    from mayabu.catalog.title_quality import sanitize_product_title
+
     specs = listing.get("specs") or {}
+    title = sanitize_product_title(listing.get("title")) or (listing.get("title") or "")
+    title_norm = sanitize_product_title(listing.get("title_norm")) or (listing.get("title_norm") or "")
     identity = build_identity(
-        listing.get("title") or listing.get("title_norm") or "",
+        title or title_norm,
         specs,
-        listing.get("category") or specs.get("category") or "laptop",
+        listing.get("category") or specs.get("category") or "unknown",
     )
     with conn.cursor() as cur:
         cur.execute(
@@ -412,8 +417,8 @@ def create_product(
             (
                 listing.get("category"),
                 specs.get("brand"),
-                listing.get("title"),
-                listing.get("title_norm"),
+                title,
+                title_norm,
                 variant_key,
                 json_value(specs),
                 listing.get("quality_score") or 0,
@@ -424,18 +429,52 @@ def create_product(
         return str(cur.fetchone()["id"])
 
 
+def _cpu_specificity(models: Any) -> int:
+    values = models if isinstance(models, (list, tuple, set)) else ([models] if models else [])
+    best = 0
+    for value in values:
+        text = str(value or "")
+        if text:
+            best = max(best, text.count(":"))
+    return best
+
+
+def _cpu_less_specific(incoming: Any, current: Any) -> bool:
+    return _cpu_specificity(incoming) < _cpu_specificity(current)
+
+
 def merge_product_specs(
     conn: Connection, product_id: str, listing: dict[str, Any]
 ) -> None:
-    specs = listing.get("specs") or {}
+    from mayabu.catalog.title_quality import is_marketing_bullet_title, sanitize_product_title
+
+    specs = dict(listing.get("specs") or {})
+    title = sanitize_product_title(listing.get("title")) or (listing.get("title") or "")
+    title_norm = sanitize_product_title(listing.get("title_norm")) or (listing.get("title_norm") or "")
+    # Prefer cleaner product-like titles over longer SEO filler.
+    prefer_incoming = bool(title) and not is_marketing_bullet_title(title)
     with conn.cursor() as cur:
+        cur.execute("select specs from product_clusters where id = %s::uuid", (product_id,))
+        current_row = cur.fetchone()
+        current = current_row.get("specs") if current_row and isinstance(current_row.get("specs"), dict) else {}
+        if _cpu_less_specific(specs.get("cpu_models"), current.get("cpu_models")):
+            specs.pop("cpu_models", None)
+            specs.pop("cpu_series", None)
         cur.execute(
             """
             update product_clusters
             set specs = product_clusters.specs || %s,
                 brand = coalesce(product_clusters.brand, %s),
                 canonical_title = case
-                  when length(%s) > length(coalesce(canonical_title, '')) then %s else canonical_title end,
+                  when %s and (
+                    coalesce(canonical_title, '') = ''
+                    or length(%s) between 12 and greatest(length(coalesce(canonical_title, '')), 12)
+                    or coalesce(canonical_title, '') ilike '%%best price%%'
+                    or coalesce(canonical_title, '') ilike '%%online at%%'
+                  ) then %s
+                  when length(%s) > length(coalesce(canonical_title, '')) then %s
+                  else canonical_title
+                end,
                 title_norm = case
                   when length(%s) > length(coalesce(title_norm, '')) then %s else title_norm end,
                 updated_at = now()
@@ -444,10 +483,13 @@ def merge_product_specs(
             (
                 json_value(specs),
                 specs.get("brand"),
-                listing.get("title") or "",
-                listing.get("title") or "",
-                listing.get("title_norm") or "",
-                listing.get("title_norm") or "",
+                prefer_incoming,
+                title,
+                title,
+                title,
+                title,
+                title_norm,
+                title_norm,
                 product_id,
             ),
         )
@@ -1488,43 +1530,75 @@ def refresh_daily_product_price(
 ) -> None:
     """Incrementally refresh one product/day rollup.
 
-    This is the normal ingest path. It avoids the old full-history window scan on
-    every observation. A full historical rebuild remains available through
-    rebuild_daily_product_prices() for corrections/backfills/nightly repair.
+    Source of truth is daily_product_platform_prices (one row per platform).
+    Legacy amazon_price/flipkart_price/... columns remain as compatibility
+    surfaces for older API consumers.
     """
     with conn.cursor() as cur:
-        cur.execute(
+        cur.execute("savepoint daily_platform_prices")
+        try:
+            cur.execute(
+            """
+            with target as (
+              select %s::uuid as product_id, coalesce(%s::date, current_date) as date
+            ), platform_day as (
+              select d.product_id, d.date, d.platform,
+                     min(d.min_price) as min_price,
+                     max(d.max_price) as max_price,
+                     coalesce(sum(d.observations_count), 0)::integer as observations_count
+              from daily_listing_prices d
+              join target t on t.product_id = d.product_id and t.date = d.date
+              group by d.product_id, d.date, d.platform
+            )
+            insert into daily_product_platform_prices(
+              product_id, date, platform, min_price, max_price, observations_count, updated_at
+            )
+            select product_id, date, platform, min_price, max_price, observations_count, now()
+            from platform_day
+            on conflict (product_id, date, platform) do update set
+              min_price = excluded.min_price,
+              max_price = excluded.max_price,
+              observations_count = excluded.observations_count,
+              updated_at = now()
+            """,
+            (product_id, date_expr),
+            )
+        except UndefinedTable:
+            cur.execute("rollback to savepoint daily_platform_prices")
+            logger.warning(
+                "daily_product_platform_prices missing; skipping platform-day rollup"
+            )
+        else:
+            cur.execute("release savepoint daily_platform_prices")
+        cur.execute("savepoint daily_product_prices")
+        try:
+            cur.execute(
             """
             with target as (
               select %s::uuid as product_id, coalesce(%s::date, current_date) as date
             ), day_row as (
-              select d.product_id, d.date,
-                     min(d.min_price) filter (where d.platform = 'amazon') as amazon_price,
-                     min(d.min_price) filter (where d.platform = 'flipkart') as flipkart_price,
-                     min(d.min_price) filter (where d.platform = 'croma') as croma_price,
-                     min(d.min_price) filter (where d.platform = 'reliancedigital') as reliancedigital_price,
-                     count(distinct d.platform) filter (where d.min_price is not null) as platform_count,
-                     coalesce(sum(d.observations_count), 0)::integer as observations_count
-              from daily_listing_prices d
-              join target t on t.product_id = d.product_id and t.date = d.date
-              group by d.product_id, d.date
+              select p.product_id, p.date,
+                     min(p.min_price) filter (where p.platform = 'amazon') as amazon_price,
+                     min(p.min_price) filter (where p.platform = 'flipkart') as flipkart_price,
+                     min(p.min_price) filter (where p.platform = 'croma') as croma_price,
+                     min(p.min_price) filter (where p.platform = 'reliancedigital') as reliancedigital_price,
+                     count(distinct p.platform) filter (where p.min_price is not null) as platform_count,
+                     coalesce(sum(p.observations_count), 0)::integer as observations_count
+              from daily_product_platform_prices p
+              join target t on t.product_id = p.product_id and t.date = p.date
+              group by p.product_id, p.date
             ), best_row as (
-              select *, least(
-                coalesce(amazon_price, 999999999),
-                coalesce(flipkart_price, 999999999),
-                coalesce(croma_price, 999999999),
-                coalesce(reliancedigital_price, 999999999)
-              ) as best_price_calc
-              from day_row
+              select d.*, b.best_price_calc, b.best_platform_calc
+              from day_row d
+              left join lateral (
+                select min_price as best_price_calc, platform as best_platform_calc
+                from daily_product_platform_prices p
+                where p.product_id = d.product_id and p.date = d.date and p.min_price is not null
+                order by p.min_price asc, p.platform asc
+                limit 1
+              ) b on true
             ), final_row as (
               select b.*,
-                     case b.best_price_calc
-                       when b.amazon_price then 'amazon'
-                       when b.flipkart_price then 'flipkart'
-                       when b.croma_price then 'croma'
-                       when b.reliancedigital_price then 'reliancedigital'
-                       else null
-                     end as best_platform_calc,
                      least(
                        coalesce((
                          select dpp.all_time_low_so_far
@@ -1533,7 +1607,7 @@ def refresh_daily_product_price(
                          order by dpp.date desc
                          limit 1
                        ), 999999999),
-                       coalesce(nullif(b.best_price_calc, 999999999), 999999999)
+                       coalesce(b.best_price_calc, 999999999)
                      ) as all_time_low_calc
               from best_row b
             )
@@ -1543,7 +1617,7 @@ def refresh_daily_product_price(
               all_time_low_so_far
             )
             select product_id, date,
-                   nullif(best_price_calc, 999999999),
+                   best_price_calc,
                    best_platform_calc,
                    amazon_price, flipkart_price, croma_price, reliancedigital_price,
                    platform_count, observations_count,
@@ -1565,7 +1639,14 @@ def refresh_daily_product_price(
               updated_at = now()
             """,
             (product_id, date_expr),
-        )
+            )
+        except UndefinedTable:
+            cur.execute("rollback to savepoint daily_product_prices")
+            logger.warning(
+                "daily_product_prices missing; observation ingest continues without product-day rollup"
+            )
+        else:
+            cur.execute("release savepoint daily_product_prices")
 
 
 def rebuild_daily_product_prices(
@@ -1578,7 +1659,25 @@ def rebuild_daily_product_prices(
     """
     with conn.cursor() as cur:
         cur.execute(
+            "delete from daily_product_platform_prices where %s::uuid is null or product_id = %s::uuid",
+            (product_id, product_id),
+        )
+        cur.execute(
             "delete from daily_product_prices where %s::uuid is null or product_id = %s::uuid",
+            (product_id, product_id),
+        )
+        cur.execute(
+            """
+            insert into daily_product_platform_prices(
+              product_id, date, platform, min_price, max_price, observations_count, updated_at
+            )
+            select product_id, date, platform,
+                   min(min_price), max(max_price),
+                   coalesce(sum(observations_count), 0)::integer, now()
+            from daily_listing_prices
+            where %s::uuid is null or product_id = %s::uuid
+            group by product_id, date, platform
+            """,
             (product_id, product_id),
         )
         cur.execute(
@@ -1590,29 +1689,25 @@ def rebuild_daily_product_prices(
                      min(min_price) filter (where platform = 'croma') as croma_price,
                      min(min_price) filter (where platform = 'reliancedigital') as reliancedigital_price,
                      count(distinct platform) filter (where min_price is not null) as platform_count,
-                     sum(observations_count) as observations_count
-              from daily_listing_prices
+                     coalesce(sum(observations_count), 0)::integer as observations_count
+              from daily_product_platform_prices
               where %s::uuid is null or product_id = %s::uuid
               group by product_id, date
             ), best_rows as (
-              select *, least(
-                coalesce(amazon_price, 999999999),
-                coalesce(flipkart_price, 999999999),
-                coalesce(croma_price, 999999999),
-                coalesce(reliancedigital_price, 999999999)
-              ) as best_price_calc
-              from day_rows
+              select d.*, b.best_price_calc, b.best_platform_calc
+              from day_rows d
+              left join lateral (
+                select min_price as best_price_calc, platform as best_platform_calc
+                from daily_product_platform_prices p
+                where p.product_id = d.product_id and p.date = d.date and p.min_price is not null
+                order by p.min_price asc, p.platform asc
+                limit 1
+              ) b on true
             ), final_rows as (
               select *,
-                     case best_price_calc
-                       when amazon_price then 'amazon'
-                       when flipkart_price then 'flipkart'
-                       when croma_price then 'croma'
-                       when reliancedigital_price then 'reliancedigital'
-                       else null
-                     end as best_platform_calc,
-                     min(nullif(best_price_calc, 999999999)) over (
-                       partition by product_id order by date rows between unbounded preceding and current row
+                     min(best_price_calc) over (
+                       partition by product_id order by date
+                       rows between unbounded preceding and current row
                      ) as all_time_low_calc
               from best_rows
             )
@@ -1622,7 +1717,7 @@ def rebuild_daily_product_prices(
               all_time_low_so_far
             )
             select product_id, date,
-                   nullif(best_price_calc, 999999999),
+                   best_price_calc,
                    best_platform_calc,
                    amazon_price, flipkart_price, croma_price, reliancedigital_price,
                    platform_count, observations_count, all_time_low_calc

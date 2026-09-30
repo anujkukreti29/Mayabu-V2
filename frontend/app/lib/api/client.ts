@@ -1,6 +1,6 @@
 import type { z } from "zod";
 import { ApiError } from "~/lib/api/errors";
-import { env } from "~/lib/config/env";
+import { resolveApiBaseUrl } from "~/lib/config/env";
 
 const CLIENT_ID_KEY = "mayabu-anonymous-client-id";
 const DEFAULT_TIMEOUT_MS = 12_000;
@@ -92,7 +92,34 @@ function apiUrl(path: string): string {
   if (!path.startsWith("/") || path.startsWith("//")) {
     throw new Error("API paths must be relative to the configured Mayabu backend.");
   }
-  return `${env.apiBaseUrl}${path}`;
+  const base = resolveApiBaseUrl();
+  return `${base}${path}`;
+}
+
+function logApiFailure(context: {
+  path: string;
+  requestId: string;
+  category: string;
+  status?: number;
+  detail?: string;
+}) {
+  if (typeof console === "undefined" || typeof console.error !== "function") return;
+  const host = (() => {
+    try {
+      const base = resolveApiBaseUrl();
+      return base ? new URL(base).host : "same-origin";
+    } catch {
+      return "unknown";
+    }
+  })();
+  console.error("[mayabu:api]", {
+    path: context.path,
+    host,
+    requestId: context.requestId,
+    category: context.category,
+    status: context.status ?? null,
+    detail: context.detail ?? null,
+  });
 }
 
 export interface RequestOptions extends Omit<RequestInit, "signal"> {
@@ -122,6 +149,7 @@ export async function apiRequest<T>(
   try {
     response = await fetch(url, {
       ...options,
+      credentials: options.credentials ?? "include",
       headers,
       signal: requestSignal.signal,
     });
@@ -131,8 +159,10 @@ export async function apiRequest<T>(
       requestSignal.timedOut() ||
       (error instanceof DOMException && error.name === "TimeoutError")
     ) {
+      logApiFailure({ path, requestId, category: "timeout" });
       throw new ApiError("The request timed out.", 0, requestId, undefined, "timeout");
     }
+    logApiFailure({ path, requestId, category: "network" });
     throw new ApiError(
       "Mayabu could not reach the product service.",
       0,
@@ -149,8 +179,18 @@ export async function apiRequest<T>(
     const retryAfter = Number(response.headers.get("Retry-After"));
     const category =
       response.status === 429 ? "rate-limit" : response.status >= 500 ? "server" : "unknown";
+    const message = await parseError(response);
+    if (category === "server" || category === "rate-limit") {
+      logApiFailure({
+        path,
+        requestId: responseRequestId,
+        category,
+        status: response.status,
+        detail: message.slice(0, 160),
+      });
+    }
     throw new ApiError(
-      await parseError(response),
+      message,
       response.status,
       responseRequestId,
       Number.isFinite(retryAfter) ? retryAfter : undefined,

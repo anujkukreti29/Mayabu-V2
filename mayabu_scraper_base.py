@@ -385,6 +385,9 @@ TITLE_POSITIVE_HINTS = (
     "laptop", "notebook", "macbook", "chromebook", "intel", "ryzen", "core i3",
     "core i5", "core i7", "core i9", "ssd", "windows", "gaming", "lenovo",
     "hp", "dell", "asus", "acer", "samsung", "apple", "msi", "infinix",
+    "iphone", "galaxy", "pixel", "oneplus", "redmi", "realme", "vivo", "oppo",
+    "motorola", "nothing", "smartphone", "mobile", "television", "oled", "qled",
+    "headphones", "earbuds", "camera", "mirrorless", "refrigerator", "washing",
 )
 
 PLATFORM_LINK_PATTERNS = {
@@ -467,10 +470,14 @@ def discount_from_prices(current_price: int | float | None, mrp: int | float | N
 
 
 def _clean_card_title(lines: list[str]) -> str | None:
+    from mayabu.catalog.title_quality import is_marketing_bullet_title, pick_best_title
+
     candidates: list[tuple[int, str]] = []
     for line in lines:
         line = compact_space(line)
-        if not line or len(line) < 18:
+        if not line or len(line) < 12:
+            continue
+        if is_marketing_bullet_title(line):
             continue
         lower = line.lower()
         if any(term in lower for term in TITLE_BAD_TERMS):
@@ -481,15 +488,24 @@ def _clean_card_title(lines: list[str]) -> str | None:
         score = len(line)
         if any(hint in lower for hint in TITLE_POSITIVE_HINTS):
             score += 120
-        if re.search(r"\b(?:\d{1,3}\s*gb|\d{3,4}\s*gb|\d+\s*tb|i[3579]|ryzen|ssd|windows)\b", lower):
+        if re.search(
+            r"\b(?:\d{1,3}\s*gb|\d{3,4}\s*gb|\d+\s*tb|i[3579]|ryzen|ssd|windows|"
+            r"galaxy|iphone|pixel|oneplus|redmi|realme|vivo|oppo)\b",
+            lower,
+        ):
             score += 40
+        # Prefer titles with brand-like tokens over feature lists
+        if line.count(",") >= 3:
+            score -= 80
         candidates.append((score, line))
     if not candidates:
-        return None
+        return pick_best_title(*lines)
     candidates.sort(reverse=True)
     title = candidates[0][1]
     if len(title) > 280:
         title = title[:280].rsplit(" ", 1)[0].strip()
+    if is_marketing_bullet_title(title):
+        return None
     return title
 
 
@@ -773,17 +789,58 @@ async def extract_structural_discovery_records(
     return structural_cards_to_raw_records(platform, query, cards)
 
 
-def discovery_health_report(records: list[dict[str, Any]], *, min_products: int = 10) -> dict[str, Any]:
-    total = len(records)
-    if total == 0:
+def discovery_health_report(
+    records: list[dict[str, Any]],
+    *,
+    min_products: int = 10,
+    scrape_status: str | None = None,
+) -> dict[str, Any]:
+    """Normalize discovery health into a stable status set.
+
+    Statuses:
+      healthy  — quality thresholds satisfied
+      degraded — usable output below expected quality/count
+      partial  — some extraction dimensions missing
+      empty    — page accessible but zero usable products
+      blocked  — challenge/access restriction detected
+      failed   — unexpected scraper/runtime error
+    """
+    if scrape_status == "blocked":
         return {
-            "status": "failed",
+            "status": "blocked",
             "count": 0,
             "title_rate": 0.0,
             "price_rate": 0.0,
             "image_rate": 0.0,
             "url_rate": 0.0,
             "duplicate_rate": 0.0,
+            "unknown_category_rate": 0.0,
+            "reasons": ["blocked_or_captcha"],
+        }
+    if scrape_status == "failed":
+        return {
+            "status": "failed",
+            "count": len(records),
+            "title_rate": 0.0,
+            "price_rate": 0.0,
+            "image_rate": 0.0,
+            "url_rate": 0.0,
+            "duplicate_rate": 0.0,
+            "unknown_category_rate": 0.0,
+            "reasons": ["scraper_runtime_error"],
+        }
+
+    total = len(records)
+    if total == 0:
+        return {
+            "status": "empty" if scrape_status in {None, "empty", "success"} else "failed",
+            "count": 0,
+            "title_rate": 0.0,
+            "price_rate": 0.0,
+            "image_rate": 0.0,
+            "url_rate": 0.0,
+            "duplicate_rate": 0.0,
+            "unknown_category_rate": 0.0,
             "reasons": ["no_products_found"],
         }
     titles = sum(1 for r in records if r.get("title"))
@@ -791,11 +848,13 @@ def discovery_health_report(records: list[dict[str, Any]], *, min_products: int 
     images = sum(1 for r in records if r.get("image") or r.get("image_url"))
     urls = [str(r.get("link") or r.get("url") or r.get("product_url") or "") for r in records]
     valid_urls = sum(1 for u in urls if u.startswith("http"))
+    unknown_cats = sum(1 for r in records if str(r.get("category") or "").lower() in {"", "unknown"})
     duplicate_rate = 1.0 - (len(set(urls)) / total if total else 0.0)
     title_rate = titles / total
     price_rate = prices / total
     image_rate = images / total
     url_rate = valid_urls / total
+    unknown_category_rate = unknown_cats / total
     reasons: list[str] = []
     if total < min_products:
         reasons.append("low_product_count")
@@ -809,7 +868,17 @@ def discovery_health_report(records: list[dict[str, Any]], *, min_products: int 
         reasons.append("invalid_product_url_rate")
     if duplicate_rate > 0.30:
         reasons.append("high_duplicate_rate")
-    status = "healthy" if not reasons else ("failed" if total == 0 or price_rate == 0 else "degraded")
+    if unknown_category_rate > 0.50:
+        reasons.append("high_unknown_category_rate")
+
+    if price_rate == 0 and title_rate > 0:
+        status = "partial"
+    elif not reasons:
+        status = "healthy"
+    elif total == 0:
+        status = "empty"
+    else:
+        status = "degraded"
     return {
         "status": status,
         "count": total,
@@ -818,5 +887,6 @@ def discovery_health_report(records: list[dict[str, Any]], *, min_products: int 
         "image_rate": round(image_rate, 3),
         "url_rate": round(url_rate, 3),
         "duplicate_rate": round(duplicate_rate, 3),
+        "unknown_category_rate": round(unknown_category_rate, 3),
         "reasons": reasons,
     }

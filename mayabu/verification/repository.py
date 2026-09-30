@@ -75,11 +75,48 @@ def get_product_verification_status(product_id: str) -> dict[str, Any]:
                 (product_id,),
             )
             rows = [dict(row) for row in cur.fetchall()]
+            # Active verification child tasks for this product (bounded).
+            cur.execute(
+                """
+                select id, platform, status, created_at, updated_at, last_error,
+                       extract(epoch from (now() - created_at)) as age_seconds
+                from scrape_tasks
+                where task_type = 'verify_listing'
+                  and metadata->>'product_id' = %s
+                  and status in ('pending','running','queued','paused')
+                order by created_at asc
+                limit 20
+                """,
+                (product_id,),
+            )
+            active = [dict(r) for r in cur.fetchall()]
     now = datetime.now(timezone.utc)
     for row in rows:
         verified = row.get("last_verified_at")
         row["age_seconds"] = max(0, int((now - verified).total_seconds())) if verified else None
-    return {"product_id": product_id, "offers": rows, "count": len(rows)}
+    expected = len(rows)
+    active_n = len(active)
+    oldest = None
+    if active:
+        ages = [float(a.get("age_seconds") or 0) for a in active]
+        oldest = max(ages) if ages else None
+    aggregate = {
+        "expected_stores": expected,
+        "active_tasks": active_n,
+        "oldest_active_age_seconds": oldest,
+        "status": (
+            "running"
+            if any(a.get("status") == "running" for a in active)
+            else ("queued" if active_n else "idle")
+        ),
+    }
+    return {
+        "product_id": product_id,
+        "offers": rows,
+        "count": len(rows),
+        "active_verification_tasks": active,
+        "aggregate": aggregate,
+    }
 
 
 def record_verification_event(
@@ -104,7 +141,10 @@ def record_verification_event(
             insert into live_verification_events(
               task_id, product_id, listing_id, platform, status, request_count,
               source, old_price, verified_price, stock_status, duration_ms, error_code
-            ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ) values (
+              %s::uuid, %s::uuid, %s::uuid, %s, %s, %s::int,
+              %s, %s::numeric, %s::numeric, %s, %s::int, %s
+            )
             """,
             (task_id, product_id, listing_id, platform, status, max(1, request_count),
              source, old_price, verified_price, stock_status, duration_ms, error_code),

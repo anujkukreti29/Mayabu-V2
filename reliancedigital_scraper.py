@@ -6,6 +6,14 @@ import re
 import urllib.parse
 from typing import Any
 
+from mayabu.scrapers.page_saturation import (
+    EMERGENCY_PAGE,
+    begin_page_run,
+    finish_page_run,
+    ids_from_records,
+    mark_stop,
+    observe_page,
+)
 from mayabu_common import utc_now
 from mayabu_scraper_base import (
     BrowserSession,
@@ -98,22 +106,28 @@ async def scrape_reliancedigital(
     output: str | None = None,
     headless: bool = True,
     debug: bool = False,
+    start_page: int = 1,
 ) -> list[dict[str, Any]]:
     config = ScrapeConfig(query=query, max_products=max_products, max_pages=max_pages, output=output, headless=headless, debug=debug)
     observed_at = utc_now()
     raw_records: list[dict[str, Any]] = []
+    begin_page_run()
 
     async with BrowserSession(headless=headless, timeout_ms=config.timeout_ms) as session:
         page = await session.new_page()
+        page.set_default_timeout(config.timeout_ms)
         encoded = urllib.parse.quote_plus(query)
         requested_pages = max_pages or 1
-        detected_pages = requested_pages
-        actual_pages = requested_pages
+        detected_pages = None
         selector = None
-        for page_no in range(1, requested_pages + 1):
-            if page_no > actual_pages:
+        first_page = max(1, int(start_page or 1))
+        last_allowed = min(first_page + requested_pages - 1, EMERGENCY_PAGE)
+        for page_no in range(first_page, last_allowed + 1):
+            if detected_pages is not None and page_no > detected_pages:
+                mark_stop("retailer_last_page")
                 break
             if max_products and len(raw_records) >= max_products:
+                mark_stop("product_budget")
                 break
             url = f"https://www.reliancedigital.in/products?q={encoded}&page_no={page_no}&page_size={PAGE_SIZE}&page_type=number"
             print(f"[reliancedigital] page {page_no}: {url}")
@@ -121,14 +135,14 @@ async def scrape_reliancedigital(
                 await page.goto(url, wait_until="domcontentloaded", timeout=config.timeout_ms)
             except Exception as exc:
                 print(f"[reliancedigital] navigation failed on page {page_no}: {exc}")
+                mark_stop("navigation_failed")
                 break
             await close_common_popups(page)
             await dismiss_overlays(page)
-            if page_no == 1:
+            if selector is None:
                 selector = await wait_for_any_selector(page, CARD_SELECTORS, timeout_ms=20_000)
-                detected_pages = await detect_max_pages(page, requested_pages)
-                actual_pages = max(1, min(detected_pages, requested_pages))
-                print(f"[reliancedigital] detected_pages={detected_pages}; actual_pages={actual_pages}; requested_pages={requested_pages}")
+                detected_pages = await detect_max_pages(page, first_page + requested_pages - 1)
+                print(f"[reliancedigital] detected_pages={detected_pages}; requested_pages={requested_pages}; start_page={first_page}")
             if not selector:
                 print("[reliancedigital] no product cards found; trying structural fallback")
                 fallback = await extract_structural_discovery_records(page, PLATFORM, query, max_items=max_products or 120)
@@ -137,8 +151,11 @@ async def scrape_reliancedigital(
                 raw_records.extend(fallback)
                 if fallback:
                     print(f"[reliancedigital] structural/DOM fallback recovered {len(fallback)} raw cards")
+                    if observe_page(page_no, ids_from_records(PLATFORM, fallback)):
+                        break
                     continue
                 print("[reliancedigital] no product cards found after fallback; stopping")
+                observe_page(page_no, [])
                 break
             await human_scroll(page)
             cards = await page.query_selector_all(selector)
@@ -152,16 +169,24 @@ async def scrape_reliancedigital(
                 if max_products and len(raw_records) >= max_products:
                     break
             print(f"[reliancedigital] page {page_no}: +{page_added} raw cards")
+            page_items = raw_records[-page_added:] if page_added else []
             if page_added == 0:
                 fallback = await extract_structural_discovery_records(page, PLATFORM, query, max_items=max_products or 120)
                 if not fallback:
                     fallback = await recover_cards_when_empty(page, PLATFORM, query, config, reason="zero_cards")
                 raw_records.extend(fallback)
+                page_items = fallback
                 if fallback:
                     print(f"[reliancedigital] structural/DOM fallback recovered {len(fallback)} raw cards")
                 else:
+                    observe_page(page_no, [])
                     break
+            stop = observe_page(page_no, ids_from_records(PLATFORM, page_items))
+            if stop:
+                print(f"[reliancedigital] stop {stop} on page {page_no}")
+                break
             await polite_sleep(config)
+    finish_page_run()
 
     records = finalize_records(PLATFORM, query, raw_records, observed_at)
     health = discovery_health_report(records, min_products=min(10, max_products or 10))

@@ -1,0 +1,29 @@
+[Unit]
+Description=Mayabu automation scheduler
+Documentation=docs/PRICE_ENGINE.md
+After=network-online.target postgresql.service redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mayabu
+Group=mayabu
+WorkingDirectory=/opt/mayabu/current
+EnvironmentFile=-/etc/mayabu/mayabu.env
+ExecStart=/opt/mayabu/current/.venv/bin/python -m mayabu.scheduler
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mayabu-scheduler
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mayabu/current/logs /var/lib/mayabu
+
+[Install]
+WantedBy=multi-user.target

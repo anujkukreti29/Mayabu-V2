@@ -6,6 +6,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
+from mayabu.auth.repository import cleanup_auth_artifacts
 from mayabu.core.config import get_app_settings
 from mayabu.db.connection import db_connection
 from mayabu.search.index_manager import drain_dirty_search_documents
@@ -117,6 +118,7 @@ def run_maintenance(job: str = "all") -> dict[str, Any]:
             stats["deleted_verification_events"] = cleanup_live_verification_events(
                 settings.live_verification_event_retention_days
             )
+            stats["deleted_auth_artifacts"] = cleanup_auth_artifacts()
         _record_finish(run_id, "completed", stats)
         return {"run_id": run_id, "status": "completed", **stats}
     except Exception as exc:

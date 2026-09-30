@@ -8,8 +8,6 @@ const routes = [
   "privacy/index.html",
   "terms/index.html",
   "disclaimer/index.html",
-  "laptops/index.html",
-  "mobile-phones/index.html",
 ];
 for (const route of routes) await access(`build/client/${route}`);
 console.log(`Verified ${routes.length} prerendered routes.`);

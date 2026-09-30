@@ -38,5 +38,7 @@ The migration adds tables, columns, indexes, functions, and triggers without del
 - Search pagination is performed in PostgreSQL, so offsets beyond the old 300-row rerank window no longer silently return empty pages.
 - Price refreshes invalidate product and price-history caches only; search cache entries expire through their short TTL.
 - `MAYABU_SCRAPER_PLATFORM_CONCURRENCY` now affects worker semaphores within conservative platform caps.
+- For local multi-category catalog seed + search qualification against disposable Postgres, see `docs/STAGING_CATALOG.md`.
+- Always set `MAYABU_TEST_DATABASE_URL` to a database whose name contains `test` before running `tests/test_v51_postgres_integration.py`.
 - `MAYABU_API_WORKERS` controls production Uvicorn process count.
 - Run `python -m pytest -q tests/test_v51_postgres_integration.py` with a dedicated `MAYABU_TEST_DATABASE_URL` before production deployment.

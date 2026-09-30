@@ -94,8 +94,8 @@ def test_product_invalidation_does_not_wipe_search_cache() -> None:
     cache = Cache()
     calls: list[str] = []
     cache.delete_prefix = lambda prefix, batch_size=500: calls.append(prefix) or 1  # type: ignore[method-assign]
-    assert cache.invalidate_product("abc") == 2
-    assert calls == ["product:abc:", "price-history:abc:"]
+    assert cache.invalidate_product("abc") == 3
+    assert calls == ["product:abc:", "price-history:abc:", "price-intelligence:abc:"]
 
 
 def test_worker_platform_limit_uses_configuration() -> None:

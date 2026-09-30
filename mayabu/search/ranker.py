@@ -1,10 +1,13 @@
-"""Deterministic, bounded product-search ranking."""
+"""Category-aware scoring layered on the generic ranker core."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from typing import Any
+
+from mayabu.search.category_registry import get_search_category
+from mayabu.search.intent_rank import intent_adjustment
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _STOP_WORDS = {
@@ -19,6 +22,16 @@ _STOP_WORDS = {
     "india",
     "laptop",
     "notebook",
+    "phone",
+    "smartphone",
+    "television",
+    "tv",
+    "refrigerator",
+    "fridge",
+    "washing",
+    "machine",
+    "earbuds",
+    "headphones",
     "windows",
     "home",
     "office",
@@ -34,6 +47,7 @@ _TEXT_FIELDS = (
     "search_text",
     "model_codes_text",
     "cpu_series",
+    "family",
 )
 
 
@@ -96,6 +110,15 @@ def _query_match_score(text: str, context: _RankContext) -> float:
     return score
 
 
+def _spec_value(row: dict[str, Any], key: str) -> Any:
+    if row.get(key) is not None:
+        return row.get(key)
+    specs = row.get("specs")
+    if isinstance(specs, dict):
+        return specs.get(key)
+    return None
+
+
 def _spec_match(
     row: dict[str, Any],
     specs: dict[str, Any],
@@ -109,16 +132,25 @@ def _spec_match(
         return False
 
     row_value = row.get(row_key or key)
+    if row_value is None:
+        row_value = _spec_value(row, key)
     if row_value is not None:
         try:
             return int(float(row_value)) == int(float(value))
         except (TypeError, ValueError):
             return str(row_value).lower() == str(value).lower()
-
-    row_specs = row.get("specs")
-    if isinstance(row_specs, dict) and row_specs.get(key) is not None:
-        return str(row_specs[key]).lower() == str(value).lower()
     return _string_contains(text, value)
+
+
+def _spec_conflict(row: dict[str, Any], specs: dict[str, Any], key: str, *, tolerance: float = 0.0) -> bool:
+    query_value = specs.get(key)
+    row_value = _spec_value(row, key)
+    if query_value is None or row_value is None:
+        return False
+    try:
+        return abs(float(query_value) - float(row_value)) > tolerance
+    except (TypeError, ValueError):
+        return str(query_value).lower() != str(row_value).lower()
 
 
 def score_product(
@@ -132,6 +164,7 @@ def score_product(
     text = _row_text(row)
     score = _query_match_score(text, context)
     brand = specs.get("brand")
+    category = str(row.get("category") or specs.get("_category") or "")
 
     if row.get("exact_model_match"):
         score += 95.0
@@ -144,6 +177,7 @@ def score_product(
     if brand and str(row.get("brand") or "").lower() == str(brand).lower():
         score += 30.0
 
+    # Laptop-compatible text signals (preserve baseline).
     for key, weight in (("cpu", 28), ("gpu", 16), ("model_code", 52)):
         if _string_contains(text, specs.get(key)):
             score += weight
@@ -154,18 +188,40 @@ def score_product(
         score += 18.0
 
     for key in ("ram_gb", "storage_gb"):
-        query_value = specs.get(key)
-        row_value = row.get(key)
-        if query_value is None or row_value is None:
-            continue
-        try:
-            conflicts = int(float(query_value)) != int(float(row_value))
-        except (TypeError, ValueError):
-            conflicts = False
-        if conflicts:
+        if _spec_conflict(row, specs, key):
             score -= 14.0
             if row.get("match_group") == "exact_match":
                 row["match_group"] = "similar_variant"
+
+    # Category-specific ranking signals from registry allowlists.
+    info = get_search_category(category)
+    if info:
+        for key in info.ranking_keys:
+            if key in {"model_codes", "family", "brand"}:
+                continue
+            if _spec_match(row, specs, key, text=text):
+                score += 16.0
+            elif _spec_conflict(row, specs, key, tolerance=0.5 if "inch" in key or key.endswith("_l") or key.endswith("_kg") else 0.0):
+                score -= 12.0
+                if row.get("match_group") == "exact_match":
+                    row["match_group"] = "similar_variant"
+        for key in info.supporting_rank_keys:
+            if _spec_match(row, specs, key, text=text):
+                score += 6.0
+
+    # Screen-size intent for TVs (also laptop screen_inch via column).
+    if _spec_match(row, specs, "screen_size_inch", text=text) or _spec_match(
+        row, specs, "screen_inch", text=text, row_key="screen_inch"
+    ):
+        score += 20.0
+    if _spec_match(row, specs, "panel_type", text=text):
+        score += 10.0
+    if _spec_match(row, specs, "capacity_l", text=text) or _spec_match(row, specs, "capacity_kg", text=text):
+        score += 18.0
+    if _spec_match(row, specs, "load_type", text=text) or _spec_match(row, specs, "automation_type", text=text):
+        score += 12.0
+    if specs.get("anc") and (_spec_value(row, "anc") is True or _string_contains(text, "anc")):
+        score += 8.0
 
     score += min(32.0, _to_float(row.get("text_rank")) * 32.0)
     score += min(16.0, _to_float(row.get("listing_rank")) * 4.0)
@@ -177,6 +233,18 @@ def score_product(
         score += min(20.0, int(row.get("platform_count") or 0) * 5.0)
     if row.get("image_url"):
         score += 2.0
+    score += intent_adjustment(
+        query=str(specs.get("_query") or ""),
+        category=category,
+        text=" ".join(
+            [
+                text,
+                str(_spec_value(row, "gpu") or ""),
+                str(_spec_value(row, "panel_type") or ""),
+                str(row.get("family") or ""),
+            ]
+        ),
+    )
     return round(score, 4)
 
 
@@ -184,6 +252,11 @@ def rank_products(
     rows: list[dict[str, Any]], specs: dict[str, Any]
 ) -> list[dict[str, Any]]:
     """Return a ranked copy; query parsing is performed once per result page."""
+    import time
+
+    from mayabu.monitoring import instrumentation as metrics
+
+    started = time.perf_counter()
     context = _rank_context(specs)
     ranked: list[dict[str, Any]] = []
     for row in rows:
@@ -197,8 +270,14 @@ def rank_products(
             item.get("match_group") == "similar_variant",
             float(item.get("rank_score") or 0),
             int(item.get("platform_count") or 0),
-            item.get("last_seen_at") or "",
+            str(item.get("last_seen_at") or ""),
+            str(item.get("product_id") or ""),
         ),
         reverse=True,
+    )
+    category = str(specs.get("_category") or "unknown")[:40]
+    mode = str(specs.get("_search_mode") or "unknown")[:40]
+    metrics.SEARCH_RANK.observe(
+        (time.perf_counter() - started) * 1000, category=category, search_mode=mode
     )
     return ranked

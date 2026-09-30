@@ -7,6 +7,8 @@ export default {
     unstable_optimizeDeps: true,
   },
 
+  // Category landings are SSR'd at request time against live catalog data.
+  // Do not prerender them into a stale static snapshot.
   prerender: [
     "/",
     "/about",
@@ -16,7 +18,5 @@ export default {
     "/privacy",
     "/terms",
     "/disclaimer",
-    "/laptops",
-    "/mobile-phones",
   ],
 } satisfies Config;

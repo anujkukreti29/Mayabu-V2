@@ -26,6 +26,36 @@ def get_request_id() -> str | None:
 
 
 class JsonFormatter(logging.Formatter):
+    _SECRET_KEYS = (
+        "password",
+        "passwd",
+        "secret",
+        "api_key",
+        "apikey",
+        "authorization",
+        "cookie",
+        "token",
+        "csrf",
+        "database_url",
+        "redis_url",
+    )
+
+    def _sanitize(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            cleaned: dict[str, Any] = {}
+            for key, item in value.items():
+                if any(s in str(key).lower() for s in self._SECRET_KEYS):
+                    cleaned[key] = "[redacted]"
+                else:
+                    cleaned[key] = self._sanitize(item)
+            return cleaned
+        if isinstance(value, str):
+            lowered = value.lower()
+            if "password=" in lowered or "api_key=" in lowered or "bearer " in lowered:
+                return "[redacted]"
+            return value
+        return value
+
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -41,20 +71,38 @@ class JsonFormatter(logging.Formatter):
             "duration_ms",
             "platform",
             "task_id",
+            "task_type",
+            "category",
             "product_id",
             "status_code",
+            "status",
             "error",
+            "route",
+            "method",
+            "operation",
             "search_mode",
             "search_relation",
             "api_workers",
             "api_threadpool_tokens",
             "db_pool_max_size",
+            "environment",
+            "redis_cache_enabled",
+            "redis_rate_limit_enabled",
+            "run_id",
+            "release_version",
+            "git_sha",
+            "email_delivered",
+            "kind",
+            "result",
+            "api_key",
+            "token",
+            "password",
         ):
             if hasattr(record, key):
-                payload[key] = getattr(record, key)
+                payload[key] = self._sanitize(getattr(record, key))
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, ensure_ascii=False, default=str)
+        return json.dumps(self._sanitize(payload), ensure_ascii=False, default=str)
 
 
 def configure_logging(level: str | None = None) -> None:
@@ -66,4 +114,4 @@ def configure_logging(level: str | None = None) -> None:
     handler.setFormatter(JsonFormatter())
     root.addHandler(handler)
     root.setLevel(getattr(logging, (level or os.getenv("MAYABU_LOG_LEVEL", "INFO")).upper(), logging.INFO))
-    setattr(root, "_mayabu_configured", True)
+    root._mayabu_configured = True

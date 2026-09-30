@@ -2,18 +2,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from playwright.async_api import async_playwright
-
+from mayabu_refresh.browser_pool import get_refresh_browser_pool, wait_for_price_or_stock
 from mayabu_refresh.common import (
-    DEFAULT_USER_AGENT,
-    detect_stock_status,
     close_common_popups,
+    classify_and_apply_stock,
     extract_first_price_text,
     extract_price_refresh_by_visible_text,
     maybe_save_debug,
     result_from_texts,
 )
 from mayabu_refresh.models import RefreshResult
+
+_PRICE_SELECTORS = [
+    "div.product-price",
+    ".product-price",
+    "[class*='selling-price']",
+    "[class*='offer-price']",
+    "meta[property='product:price:amount']",
+]
 
 
 async def _price_text(el) -> str | None:
@@ -40,25 +46,17 @@ async def scrape_reliancedigital_refresh(
     artifact_dir: str | Path | None = None,
 ) -> RefreshResult:
     """Refresh only Reliance Digital price fields."""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=headless, args=["--no-sandbox", "--disable-dev-shm-usage"]
-        )
-        context = await browser.new_context(
-            user_agent=DEFAULT_USER_AGENT,
-            viewport={"width": 1366, "height": 768},
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-            extra_http_headers={"Accept-Language": "en-IN,en;q=0.9"},
-        )
-        page = await context.new_page()
-        page.set_default_timeout(15000)
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=55000)
-            await page.wait_for_timeout(3000)
+    pool = get_refresh_browser_pool()
+    try:
+        async with pool.page(headless=headless, default_timeout_ms=12_000) as page:
+            await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
             await close_common_popups(page)
+            await wait_for_price_or_stock(
+                page,
+                price_selectors=_PRICE_SELECTORS,
+                timeout_ms=6_000,
+            )
             await page.evaluate("window.scrollTo(0, 300)")
-            await page.wait_for_timeout(900)
 
             html_lc = (await page.content()).lower()
             if any(
@@ -101,13 +99,7 @@ async def scrape_reliancedigital_refresh(
             await maybe_save_debug(
                 page, prefix="reliance_refresh", debug=debug, artifact_dir=artifact_dir
             )
-            result.stock_status = detect_stock_status(html_lc)  # type: ignore[assignment]
+            classify_and_apply_stock(result, html_lc, scoped=False)
             return result
-        except Exception as exc:
-            await maybe_save_debug(
-                page, prefix="reliance_error", debug=debug, artifact_dir=artifact_dir
-            )
-            return RefreshResult.failed(f"reliance_refresh_error: {exc}")
-        finally:
-            await context.close()
-            await browser.close()
+    except Exception as exc:
+        return RefreshResult.failed(f"reliance_refresh_error: {exc}")

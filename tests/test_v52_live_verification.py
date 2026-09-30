@@ -262,3 +262,22 @@ def test_production_global_limiter_fails_closed_when_redis_is_unavailable():
         )
         == "global_limited"
     )
+
+
+def test_user_price_verification_metrics_use_inc_kwargs():
+    """Regression: custom metrics registry has no .labels() — wrong API caused HTTP 500."""
+    from pathlib import Path
+
+    routes = (
+        Path(__file__).resolve().parents[1] / "mayabu" / "api" / "verification_routes.py"
+    ).read_text(encoding="utf-8")
+    assert "USER_PRICE_VERIFICATION.inc(" in routes
+    assert ".labels(" not in routes
+
+
+def test_refresh_update_casts_nullable_price_comparisons():
+    """Regression: NULL current_price in CASE %s IS NOT NULL caused IndeterminateDatatype ($11)."""
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "mayabu_db" / "refresh_ingestion.py").read_text(encoding="utf-8")
+    assert "%s::numeric is not null" in source
+    assert "current_price is distinct from %s::numeric" in source

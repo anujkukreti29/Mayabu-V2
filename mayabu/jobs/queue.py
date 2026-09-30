@@ -9,6 +9,7 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from mayabu.db.connection import db_connection
+from mayabu.platforms.registry import PLATFORMS
 from mayabu_common import canonical_platform, normalize_url
 
 
@@ -39,7 +40,7 @@ def enqueue_task(
     force: bool = False,
 ) -> dict[str, Any]:
     platform = canonical_platform(platform)
-    allowed_platforms = {"amazon", "flipkart", "croma", "reliancedigital", "system"}
+    allowed_platforms = set(PLATFORMS) | {"system"}
     if platform not in allowed_platforms:
         raise ValueError(f"Unsupported platform: {platform}")
     if platform == "system" and task_type not in {"maintenance", "index_product"}:
@@ -144,7 +145,7 @@ def enqueue_verification(
     Existing same-listing work is joined before the cap is checked.
     """
     platform = canonical_platform(platform)
-    if platform not in {"amazon", "flipkart", "croma", "reliancedigital"}:
+    if platform not in PLATFORMS:
         raise ValueError(f"Unsupported verification platform: {platform}")
     normalized_url = normalize_url(url or "")
     if not normalized_url:
@@ -153,6 +154,7 @@ def enqueue_verification(
         "platform_listing_id": str(platform_listing_id),
         "product_id": str(product_id),
         "verification_mode": "live",
+        "task_source": "user_verify",
     }
     # The listing UUID is the stable identity. Product clusters can be merged or
     # reassigned while a verification task is active, which must not create a
@@ -186,6 +188,22 @@ def enqueue_verification(
                     (priority, existing["id"]),
                 )
                 return {"created": False, "task": dict(cur.fetchone()), "rejected": None}
+
+            # Promote a pending routine refresh for the same listing so user
+            # demand is not stuck behind a duplicate scheduled crawl.
+            cur.execute(
+                """
+                update scrape_tasks
+                set priority = least(priority, %s), updated_at = now()
+                where status = 'pending'
+                  and task_type = 'refresh_listing'
+                  and (
+                    metadata->>'platform_listing_id' = %s
+                    or url = %s
+                  )
+                """,
+                (int(priority), str(platform_listing_id), normalized_url),
+            )
 
             # One tiny global admission critical section. The lock is held only
             # for COUNT + INSERT, never while scraping.

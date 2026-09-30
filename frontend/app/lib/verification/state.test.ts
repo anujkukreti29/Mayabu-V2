@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "~/lib/api/errors";
 import type { VerificationJob } from "~/lib/api/schemas";
-import { deriveVerificationSummary, type VerificationStateInput } from "./state";
+import {
+  deriveVerificationSummary,
+  verificationPriceDelta,
+  type VerificationStateInput,
+} from "./state";
 
 function job(overrides: Partial<VerificationJob>): VerificationJob {
   return {
@@ -53,7 +57,7 @@ describe("deriveVerificationSummary", () => {
     ).toBe("joined");
   });
 
-  it("maps running and completed tasks", () => {
+  it("maps running, unchanged, changed, and partial multi-store results", () => {
     expect(
       deriveVerificationSummary({
         ...base,
@@ -66,9 +70,48 @@ describe("deriveVerificationSummary", () => {
         ...base,
         allTerminal: true,
         taskIds: ["task-1"],
-        jobs: [job({ status: "completed" })],
+        jobs: [job({ status: "completed", result: { price: 69999, old_price: 69999 } })],
       }),
-    ).toBe("completed");
+    ).toBe("completed_unchanged");
+    expect(
+      deriveVerificationSummary({
+        ...base,
+        allTerminal: true,
+        taskIds: ["task-1"],
+        jobs: [job({ status: "completed", result: { price: 64999, old_price: 69999 } })],
+      }),
+    ).toBe("completed_changed");
+    expect(
+      deriveVerificationSummary({
+        ...base,
+        allTerminal: true,
+        taskIds: ["task-1", "task-2"],
+        jobs: [
+          job({ task_id: "task-1", status: "completed", result: { price: 69999 } }),
+          job({
+            task_id: "task-2",
+            status: "failed",
+            last_error: "network timeout",
+          }),
+        ],
+      }),
+    ).toBe("partial");
+  });
+
+  it("maps stale fallback separately from unchanged", () => {
+    expect(
+      deriveVerificationSummary({
+        ...base,
+        allTerminal: true,
+        taskIds: ["task-1"],
+        jobs: [
+          job({
+            status: "completed",
+            result: { price: 69999, old_price: 69999, stale: true },
+          }),
+        ],
+      }),
+    ).toBe("stale_fallback");
   });
 
   it("preserves out-of-stock as a successful result", () => {
@@ -135,6 +178,21 @@ describe("deriveVerificationSummary", () => {
       }),
     ).toBe("expired");
   });
+
+  it("treats deadline with successful stores as partial", () => {
+    expect(
+      deriveVerificationSummary({
+        ...base,
+        expired: true,
+        taskIds: ["task-1", "task-2"],
+        jobs: [
+          job({ status: "completed", result: { price: 49990, valid: true } }),
+          job({ status: "running" }),
+        ],
+      }),
+    ).toBe("partial");
+  });
+
   it("reports unavailable when job polling fails before status is loaded", () => {
     expect(
       deriveVerificationSummary({
@@ -143,5 +201,20 @@ describe("deriveVerificationSummary", () => {
         jobErrors: [new ApiError("offline", 0, "r4", undefined, "network")],
       }),
     ).toBe("unavailable");
+  });
+});
+
+describe("verificationPriceDelta", () => {
+  it("detects changed and unchanged outcomes", () => {
+    expect(
+      verificationPriceDelta([
+        job({ status: "completed", result: { old_price: 50000, price: 48000 } }),
+      ]),
+    ).toEqual({ oldPrice: 50000, newPrice: 48000, changed: true });
+    expect(
+      verificationPriceDelta([
+        job({ status: "completed", result: { old_price: 50000, price: 50000 } }),
+      ]).changed,
+    ).toBe(false);
   });
 });

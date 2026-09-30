@@ -18,11 +18,21 @@ from typing import Any
 from playwright.async_api import Page, async_playwright
 
 from mayabu.core.config import get_app_settings
+from mayabu.domain.categories.registry import detect_category_from_evidence
 from mayabu_common import extract_native_id, extract_specs, normalize_url, parse_price
 from mayabu.scrapers.platforms import detect_platform, validate_product_url
 from mayabu.scrapers.detail.models import DetailProduct
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_SELECTORS = {
+    "title": ["h1", "meta[property='og:title']", "[itemprop='name']"],
+    "price": ["meta[property='product:price:amount']", "[itemprop='price']"],
+    "mrp": ["meta[property='product:original_price:amount']"],
+    "image": ["meta[property='og:image']", "[itemprop='image']"],
+    "availability": ["[itemprop='availability']"],
+    "seller": [],
+}
 
 _SELECTORS = {
     "amazon": {
@@ -41,22 +51,12 @@ _SELECTORS = {
         "availability": ["[itemprop='availability']"],
         "seller": ["#sellerName", "[data-testid='seller-name']"],
     },
-    "croma": {
-        "title": ["h1", "meta[property='og:title']"],
-        "price": ["meta[property='product:price:amount']", "[itemprop='price']"],
-        "mrp": ["meta[property='product:original_price:amount']"],
-        "image": ["meta[property='og:image']", "[itemprop='image']"],
-        "availability": ["[itemprop='availability']"],
-        "seller": [],
-    },
-    "reliancedigital": {
-        "title": ["h1", "meta[property='og:title']"],
-        "price": ["meta[property='product:price:amount']", "[itemprop='price']"],
-        "mrp": ["meta[property='product:original_price:amount']"],
-        "image": ["meta[property='og:image']", "[itemprop='image']"],
-        "availability": ["[itemprop='availability']"],
-        "seller": [],
-    },
+    "croma": dict(_DEFAULT_SELECTORS),
+    "reliancedigital": dict(_DEFAULT_SELECTORS),
+    "vijaysales": dict(_DEFAULT_SELECTORS),
+    "jiomart": dict(_DEFAULT_SELECTORS),
+    "poorvika": dict(_DEFAULT_SELECTORS),
+    "bajajelectronics": dict(_DEFAULT_SELECTORS),
 }
 
 _USER_AGENTS = (
@@ -128,17 +128,273 @@ def _offer(product: dict[str, Any]) -> dict[str, Any]:
 
 
 def _image(product: dict[str, Any]) -> str | None:
-    image = product.get("image")
-    if isinstance(image, list):
-        image = next((x for x in image if isinstance(x, str) and x), None)
-    if isinstance(image, dict):
-        image = image.get("url") or image.get("contentUrl")
-    return str(image).strip() if image else None
+    images = _images(product)
+    return images[0] if images else None
+
+
+def _images(product: dict[str, Any]) -> list[str]:
+    """Extract ordered gallery URLs from JSON-LD Product.image."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                _add(item)
+            return
+        if isinstance(value, dict):
+            value = value.get("url") or value.get("contentUrl") or value.get("@id")
+        text = str(value or "").strip()
+        if not text or text.startswith("data:") or text in seen:
+            return
+        low = text.lower()
+        if any(tok in low for tok in ("1x1", "pixel", "spacer", "logo", "badge", "sprite", "tracking")):
+            return
+        seen.add(text)
+        out.append(text)
+
+    _add(product.get("image"))
+    return out[:10]
+
+
+_GALLERY_SELECTORS: dict[str, list[str]] = {
+    "amazon": [
+        "#altImages img",
+        "#imageBlock_feature_div img",
+        "#landingImage",
+    ],
+    "flipkart": [
+        "ul[class*='_3GnUWp'] img",
+        "div[class*='_2E1Fgs'] img",
+        "img[loading='eager']",
+    ],
+    "croma": [
+        "[class*='pdp-gallery'] img",
+        "[class*='product-gallery'] img",
+        "meta[property='og:image']",
+    ],
+    "reliancedigital": [
+        "[class*='pdp'] img",
+        "[class*='gallery'] img",
+        "meta[property='og:image']",
+    ],
+    "vijaysales": ["[class*='gallery'] img", "meta[property='og:image']"],
+    "poorvika": ["[class*='gallery'] img", "meta[property='og:image']"],
+}
+
+
+async def _gallery_from_dom(page: Page, platform: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for selector in _GALLERY_SELECTORS.get(platform, ["meta[property='og:image']"]):
+        try:
+            elements = await page.query_selector_all(selector)
+        except Exception:
+            continue
+        for el in elements[:24]:
+            try:
+                raw = (
+                    await el.get_attribute("data-old-hires")
+                    or await el.get_attribute("data-a-dynamic-image")
+                    or await el.get_attribute("srcset")
+                    or await el.get_attribute("data-src")
+                    or await el.get_attribute("content")
+                    or await el.get_attribute("src")
+                )
+            except Exception:
+                continue
+            if not raw:
+                continue
+            # Amazon data-a-dynamic-image is JSON map of url->size
+            if raw.strip().startswith("{"):
+                try:
+                    payload = json.loads(raw)
+                    if isinstance(payload, dict):
+                        # Prefer largest listed dimension
+                        ranked = sorted(
+                            ((str(u), int(sz[0]) * int(sz[1]) if isinstance(sz, list) and len(sz) >= 2 else 0)
+                             for u, sz in payload.items()),
+                            key=lambda item: item[1],
+                            reverse=True,
+                        )
+                        for url, _ in ranked[:6]:
+                            if url and url not in seen:
+                                seen.add(url)
+                                urls.append(url)
+                        continue
+                except Exception:
+                    pass
+            # srcset: take last (usually largest)
+            if "," in raw and " " in raw:
+                parts = [p.strip().split(" ")[0] for p in raw.split(",") if p.strip()]
+                raw = parts[-1] if parts else raw
+            value = str(raw).strip()
+            if not value or value.startswith("data:") or value in seen:
+                continue
+            low = value.lower()
+            if any(tok in low for tok in ("1x1", "pixel", "spacer", "logo", "badge", "sprite", "icon", "tracking")):
+                continue
+            # Skip tiny thumbs by filename heuristics
+            if re.search(r"[_-](ss|sx|sy)\d{2,3}\.", low):
+                continue
+            seen.add(value)
+            urls.append(value)
+            if len(urls) >= 10:
+                return urls
+    return urls
 
 
 def _numeric(value: Any) -> float | None:
     parsed = parse_price(value)
     return round(float(parsed), 2) if parsed is not None else None
+
+
+async def _amazon_variant_identity(page: Page) -> dict[str, str]:
+    """Factual Amazon selected-variant text (color / size / configuration).
+
+    Prefers selected twister labels and variation rows. Does not infer from images.
+    """
+    out: dict[str, str] = {}
+    selectors = [
+        ("color", "#variation_color_name .selection"),
+        ("color", "#inline-twister-expanded-dimension-text-color_name"),
+        ("color", "#variation_color_name span.selection"),
+        ("size", "#variation_size_name .selection"),
+        ("size", "#inline-twister-expanded-dimension-text-size_name"),
+        ("style", "#variation_style_name .selection"),
+        ("configuration", "#variation_configuration_name .selection"),
+        ("configuration", "#inline-twister-expanded-dimension-text-configuration"),
+    ]
+    for key, selector in selectors:
+        if key in out:
+            continue
+        try:
+            el = await page.query_selector(selector)
+            if not el:
+                continue
+            text = ((await el.inner_text()) or "").strip()
+            if text and len(text) < 80:
+                out[key] = text
+        except Exception:
+            continue
+    # Selected twister row aria labels often include "Color: Midnight"
+    try:
+        selected = await page.query_selector(
+            "#twister .swatchSelect[aria-checked='true'], "
+            "#twister .swatchSelect.selected, "
+            "#inline-twister-row .a-button-selected"
+        )
+        if selected:
+            label = (
+                (await selected.get_attribute("aria-label"))
+                or (await selected.get_attribute("title"))
+                or ""
+            ).strip()
+            if label and "color" not in out and re.search(r"color", label, re.I):
+                out["color"] = re.sub(r"(?i)^.*?color\s*[:\-]\s*", "", label).strip()[:80]
+    except Exception:
+        pass
+    return out
+
+
+async def _amazon_selling_price(page: Page) -> tuple[float | None, float | None]:
+    """Extract Amazon India current selling price + MRP from the buybox only.
+
+    Prefer selected offer / priceToPay. Never treat EMI, bank offer, or
+    recommendation carousel prices as the selling price.
+    """
+    selling: float | None = None
+    mrp: float | None = None
+
+    # Scoped to the buybox / core price feature — not related products.
+    selling_selectors = [
+        "#corePrice_feature_div span.priceToPay span.a-offscreen",
+        "#corePriceDisplay_desktop_feature_div span.priceToPay span.a-offscreen",
+        "#corePriceDisplay_desktop_feature_div .a-price.priceToPay .a-offscreen",
+        "#apex_desktop span.priceToPay span.a-offscreen",
+        "#tp_price_block_total_price_ww span.a-offscreen",
+        "#priceblock_dealprice",
+        "#priceblock_ourprice",
+        "#corePrice_feature_div .a-price[data-a-color='price'] .a-offscreen",
+        "#corePriceDisplay_desktop_feature_div .a-price[data-a-color='price'] .a-offscreen",
+    ]
+    for selector in selling_selectors:
+        try:
+            el = await page.query_selector(selector)
+            if not el:
+                continue
+            raw = (await el.inner_text() or "").strip()
+            if not raw:
+                raw = (
+                    (await el.get_attribute("content") or "")
+                    or (await el.get_attribute("value") or "")
+                ).strip()
+            price = _numeric(raw)
+            if price is not None and price > 0:
+                selling = price
+                break
+        except Exception:
+            continue
+
+    # Whole + fraction fallback when a-offscreen is empty / stripped.
+    if selling is None:
+        whole_selectors = [
+            "#corePrice_feature_div span.priceToPay span.a-price-whole",
+            "#corePriceDisplay_desktop_feature_div span.priceToPay span.a-price-whole",
+            "#corePriceDisplay_desktop_feature_div .a-price[data-a-color='price'] span.a-price-whole",
+            "#apex_desktop span.a-price-whole",
+        ]
+        for selector in whole_selectors:
+            try:
+                whole_el = await page.query_selector(selector)
+                if not whole_el:
+                    continue
+                whole = (await whole_el.inner_text() or "").strip()
+                frac = ""
+                try:
+                    frac_el = await page.query_selector(
+                        selector.replace("a-price-whole", "a-price-fraction")
+                    )
+                    if frac_el:
+                        frac = (await frac_el.inner_text() or "").strip()
+                except Exception:
+                    frac = ""
+                combined = f"{whole}.{frac}" if frac else whole
+                price = _numeric(combined)
+                if price is not None and price > 0:
+                    selling = price
+                    break
+            except Exception:
+                continue
+
+    mrp_selectors = [
+        "#corePriceDisplay_desktop_feature_div .basisPrice .a-offscreen",
+        "#corePrice_feature_div .a-text-price .a-offscreen",
+        "#corePriceDisplay_desktop_feature_div span.a-price.a-text-price span.a-offscreen",
+        "span.a-price.a-text-price.apex-basisprice-value span.a-offscreen",
+    ]
+    for selector in mrp_selectors:
+        try:
+            el = await page.query_selector(selector)
+            if not el:
+                continue
+            price = _numeric((await el.inner_text() or "").strip())
+            if price is not None and price > 0:
+                mrp = price
+                break
+        except Exception:
+            continue
+
+    # If we only found one price and it came from a strike-through/basis slot, keep as MRP.
+    if selling is not None and mrp is not None and selling >= mrp:
+        # Mis-assigned: basis often parsed as sell — keep lower as sell only if clearly deal.
+        if selling == mrp:
+            pass
+        else:
+            # Selling should never exceed MRP; swap if inverted.
+            selling, mrp = mrp, selling
+
+    return selling, mrp
 
 
 def _availability(value: Any) -> str | None:
@@ -173,7 +429,7 @@ async def _save_artifacts(page: Page, platform: str, reason: str, artifact_dir: 
 
 
 async def _extract(page: Page, platform: str, url: str) -> DetailProduct:
-    selectors = _SELECTORS[platform]
+    selectors = _SELECTORS.get(platform) or _DEFAULT_SELECTORS
     jsonld = await _jsonld_product(page)
     offer = _offer(jsonld)
 
@@ -186,7 +442,41 @@ async def _extract(page: Page, platform: str, url: str) -> DetailProduct:
     if mrp is None:
         mrp = _numeric(await _text_or_attr(page, selectors["mrp"]))
 
+    # Amazon India: JSON-LD often exposes list/MRP but omits the selected buybox deal price.
+    if platform == "amazon":
+        amz_sell, amz_mrp = await _amazon_selling_price(page)
+        if amz_sell is not None:
+            current_price = amz_sell
+        if amz_mrp is not None and (mrp is None or mrp < amz_sell):
+            mrp = amz_mrp
+        # Never promote JSON-LD highPrice alone as current selling price.
+        if current_price is None and mrp is not None:
+            # Keep MRP separate; leave current_price missing rather than inventing sell=MRP.
+            pass
+
     image_url = _image(jsonld) or await _text_or_attr(page, selectors["image"])
+    if image_url:
+        low = image_url.lower()
+        if any(tok in low for tok in ("1x1", "pixel", "spacer", "logo", "badge", "sprite", "tracking", "vs-logo")):
+            image_url = None
+    gallery = _images(jsonld)
+    dom_gallery = await _gallery_from_dom(page, platform)
+    for gurl in dom_gallery:
+        if gurl not in gallery:
+            gallery.append(gurl)
+    gallery = [
+        g
+        for g in gallery
+        if not any(
+            tok in g.lower()
+            for tok in ("1x1", "pixel", "spacer", "logo", "badge", "sprite", "tracking", "vs-logo")
+        )
+    ]
+    if image_url and image_url not in gallery:
+        gallery = [image_url, *gallery]
+    gallery = gallery[:10]
+    if not image_url and gallery:
+        image_url = gallery[0]
     availability = _availability(offer.get("availability") or await _text_or_attr(page, selectors["availability"]))
     seller = offer.get("seller") or jsonld.get("seller")
     if isinstance(seller, dict):
@@ -204,13 +494,77 @@ async def _extract(page: Page, platform: str, url: str) -> DetailProduct:
     canonical = await _text_or_attr(page, ["link[rel='canonical']"], attrs=("href",)) or normalize_url(url)
     canonical = normalize_url(canonical)
     native_id = extract_native_id(platform, canonical or url, jsonld.get("sku") or jsonld.get("mpn"))
-    specs = extract_specs(str(title or ""), "laptop") if title else {}
-    if jsonld.get("sku"):
+    breadcrumb = ""
+    try:
+        crumbs = await page.query_selector_all("[itemtype*='BreadcrumbList'] [itemprop='name'], nav[aria-label*='breadcrumb'] a")
+        parts: list[str] = []
+        for crumb in crumbs[:8]:
+            text = (await crumb.inner_text()).strip()
+            if text:
+                parts.append(text)
+        breadcrumb = " > ".join(parts)
+    except Exception:
+        breadcrumb = ""
+    structured_category = ""
+    category_value = jsonld.get("category")
+    if isinstance(category_value, str):
+        structured_category = category_value
+    elif isinstance(category_value, list):
+        structured_category = " ".join(str(v) for v in category_value)
+    detected = detect_category_from_evidence(
+        title=str(title or ""),
+        breadcrumbs=breadcrumb,
+        url=canonical or url,
+        structured_category=structured_category,
+    )
+    # CRITICAL: never coerce unknown/accessory into laptop.
+    specs = extract_specs(str(title or ""), detected) if title else {"category": detected}
+    if platform == "amazon":
+        variant = await _amazon_variant_identity(page)
+        # Re-extract with selected variant text when title alone lacks color/config.
+        variant_blob = " ".join(
+            v for k, v in variant.items() if k in {"color", "size", "style", "configuration"} and v
+        )
+        if variant_blob and title and detected not in {"unknown", "accessory"}:
+            enriched = extract_specs(f"{title} {variant_blob}", detected)
+            for key in ("color", "ram_gb", "storage_gb", "model_codes", "cpu_models", "cpu_series"):
+                if enriched.get(key) and not specs.get(key):
+                    specs[key] = enriched[key]
+        if variant.get("color") and not specs.get("color"):
+            from mayabu.search.public_offers import extract_color_token
+
+            token = extract_color_token(variant["color"]) or variant["color"].strip().lower()
+            if token:
+                specs["color"] = token
+        color_json = jsonld.get("color")
+        if color_json and not specs.get("color"):
+            from mayabu.search.public_offers import extract_color_token
+
+            token = extract_color_token(str(color_json)) or str(color_json).strip().lower()
+            if token:
+                specs["color"] = token
+        if variant:
+            specs["amazon_variant"] = variant
+    if jsonld.get("sku") and detected not in {"unknown", "accessory"}:
         codes = set(specs.get("model_codes") or [])
         codes.add(str(jsonld["sku"]).upper())
         specs["model_codes"] = sorted(codes)
+    if jsonld.get("mpn") and detected not in {"unknown", "accessory"}:
+        codes = set(specs.get("model_codes") or [])
+        codes.add(str(jsonld["mpn"]).upper())
+        specs["model_codes"] = sorted(codes)
+    if jsonld.get("brand"):
+        brand = jsonld["brand"]
+        if isinstance(brand, dict):
+            brand = brand.get("name")
+        if brand and not specs.get("brand"):
+            specs["brand"] = str(brand).strip()
+    if detected in {"unknown", "accessory"}:
+        warnings_pre = ["category_unknown" if detected == "unknown" else "category_accessory"]
+    else:
+        warnings_pre = []
 
-    warnings: list[str] = []
+    warnings: list[str] = list(warnings_pre)
     if not title:
         warnings.append("missing_title")
     if current_price is None:
@@ -219,6 +573,19 @@ async def _extract(page: Page, platform: str, url: str) -> DetailProduct:
         warnings.append("mrp_below_price")
         mrp = None
     status = "success" if title and current_price is not None else ("partial" if title else "failed")
+
+    highlights: list[str] = []
+    try:
+        for sel in ("#feature-bullets li span", "[data-testid='product-highlights'] li", ".product-highlights li"):
+            els = await page.query_selector_all(sel)
+            for el in els[:12]:
+                text = ((await el.inner_text()) or "").strip()
+                if text and len(text) < 240 and text.lower() not in {h.lower() for h in highlights}:
+                    highlights.append(text)
+            if highlights:
+                break
+    except Exception:
+        highlights = []
 
     return DetailProduct(
         platform=platform,
@@ -230,14 +597,21 @@ async def _extract(page: Page, platform: str, url: str) -> DetailProduct:
         mrp=mrp,
         currency=str(offer.get("priceCurrency") or "INR").upper(),
         image_url=image_url,
+        image_urls=gallery,
         availability=availability,
         seller_name=seller_name,
         rating=rating,
         review_count=review_count,
         specs=specs,
+        highlights=highlights[:12],
         status=status,
         warnings=warnings,
-        evidence={"jsonld_found": bool(jsonld), "final_url": page.url},
+        evidence={
+            "jsonld_found": bool(jsonld),
+            "final_url": page.url,
+            "detected_category": detected,
+            "gallery_count": len(gallery),
+        },
     )
 
 

@@ -36,12 +36,10 @@ _MRP_PATTERNS = (
 
 
 def _stock_status(text: str) -> str:
-    value = text.lower()
-    if any(token in value for token in ("outofstock", "out of stock", "currently unavailable", "sold out")):
-        return "out_of_stock"
-    if any(token in value for token in ("instock", "in stock", "add to cart", "buy now")):
-        return "in_stock"
-    return "unknown"
+    from mayabu_refresh.stock import classify_stock_text
+
+    return classify_stock_text(text, scoped=False).public_stock
+
 
 
 def _first_price(patterns: tuple[re.Pattern[str], ...], text: str) -> int | None:
@@ -146,7 +144,15 @@ def _fetch(platform: str, url: str, timeout_seconds: float) -> RefreshResult:
     mrp = json_mrp or meta_mrp or _first_price(_MRP_PATTERNS, text)
     stock = json_stock if json_stock != "unknown" else meta_stock
     if stock == "unknown":
-        stock = _stock_status(lowered)
+        from mayabu_refresh.stock import classify_stock_text
+
+        classified = classify_stock_text(lowered, scoped=False)
+        stock = classified.public_stock
+        stock_reason = classified.reason
+        stock_confidence = classified.confidence
+    else:
+        stock_reason = "jsonld_or_meta"
+        stock_confidence = "medium"
     if price is None and stock != "out_of_stock":
         return RefreshResult.failed("lightweight_price_not_found")
     if price is not None and mrp is not None and mrp < price:
@@ -156,6 +162,8 @@ def _fetch(platform: str, url: str, timeout_seconds: float) -> RefreshResult:
         mrp=mrp,
         discount_percent=calculate_discount_percent(price, mrp),
         stock_status=stock,  # type: ignore[arg-type]
+        stock_reason=stock_reason,
+        stock_confidence=stock_confidence,
         page_status="success",
         warnings=["verification_source:lightweight"],
     )

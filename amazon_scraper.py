@@ -120,6 +120,7 @@ async def scrape_amazon(
     output: str | None = None,
     headless: bool = True,
     debug: bool = False,
+    start_page: int = 1,
 ) -> list[dict[str, Any]]:
     config = ScrapeConfig(query=query, max_products=max_products, max_pages=max_pages, output=output, headless=headless, debug=debug)
     observed_at = utc_now()
@@ -129,7 +130,8 @@ async def scrape_amazon(
         page = await session.new_page()
         encoded = urllib.parse.quote_plus(query)
         total_pages = max_pages or 1
-        for page_no in range(1, total_pages + 1):
+        first_page = max(1, int(start_page or 1))
+        for page_no in range(first_page, first_page + total_pages):
             if max_products and len(raw_records) >= max_products:
                 break
             url = f"https://www.amazon.in/s?k={encoded}&page={page_no}"

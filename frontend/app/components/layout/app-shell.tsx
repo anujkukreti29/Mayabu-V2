@@ -7,7 +7,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     <>
       <a
         href="#main-content"
-        className="fixed left-3 top-3 z-[100] -translate-y-24 rounded-lg bg-slate-950 px-4 py-3 font-bold text-white focus:translate-y-0"
+        className="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:left-3 focus-visible:top-3 focus-visible:z-[100] focus-visible:rounded-md focus-visible:bg-header focus-visible:px-4 focus-visible:py-3 focus-visible:text-sm focus-visible:font-semibold focus-visible:text-white"
       >
         Skip to main content
       </a>

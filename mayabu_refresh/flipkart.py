@@ -2,18 +2,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from playwright.async_api import async_playwright
-
+from mayabu_refresh.browser_pool import get_refresh_browser_pool, wait_for_price_or_stock
 from mayabu_refresh.common import (
-    DEFAULT_USER_AGENT,
-    detect_stock_status,
     close_common_popups,
+    classify_and_apply_stock,
     extract_first_price_text,
     extract_price_refresh_by_visible_text,
     maybe_save_debug,
     result_from_texts,
 )
 from mayabu_refresh.models import RefreshResult
+
+_PRICE_SELECTORS = [
+    "meta[property='product:price:amount']",
+    "meta[itemprop='price']",
+    "[itemprop='price']",
+]
 
 
 async def scrape_flipkart_refresh(
@@ -28,25 +32,17 @@ async def scrape_flipkart_refresh(
     Generated Flipkart class names are intentionally not used. Stable selectors
     and selectorless visible-text extraction are used instead.
     """
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=headless, args=["--no-sandbox", "--disable-dev-shm-usage"]
-        )
-        context = await browser.new_context(
-            user_agent=DEFAULT_USER_AGENT,
-            viewport={"width": 1366, "height": 768},
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-            extra_http_headers={"Accept-Language": "en-IN,en;q=0.9"},
-        )
-        page = await context.new_page()
-        page.set_default_timeout(14000)
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=50000)
-            await page.wait_for_timeout(2400)
+    pool = get_refresh_browser_pool()
+    try:
+        async with pool.page(headless=headless, default_timeout_ms=12_000) as page:
+            await page.goto(url, wait_until="domcontentloaded", timeout=40_000)
             await close_common_popups(page)
+            await wait_for_price_or_stock(
+                page,
+                price_selectors=_PRICE_SELECTORS,
+                timeout_ms=6_000,
+            )
             await page.evaluate("window.scrollTo(0, 340)")
-            await page.wait_for_timeout(700)
 
             html_lc = (await page.content()).lower()
             if any(
@@ -62,11 +58,7 @@ async def scrape_flipkart_refresh(
                 return RefreshResult.failed("flipkart_blocked_or_captcha", "captcha")
 
             price_text = None
-            for selector in [
-                "meta[property='product:price:amount']",
-                "meta[itemprop='price']",
-                "[itemprop='price']",
-            ]:
+            for selector in _PRICE_SELECTORS:
                 el = await page.query_selector(selector)
                 if el:
                     raw = (
@@ -93,13 +85,7 @@ async def scrape_flipkart_refresh(
             await maybe_save_debug(
                 page, prefix="flipkart_refresh", debug=debug, artifact_dir=artifact_dir
             )
-            result.stock_status = detect_stock_status(html_lc)  # type: ignore[assignment]
+            classify_and_apply_stock(result, html_lc, scoped=False)
             return result
-        except Exception as exc:
-            await maybe_save_debug(
-                page, prefix="flipkart_error", debug=debug, artifact_dir=artifact_dir
-            )
-            return RefreshResult.failed(f"flipkart_refresh_error: {exc}")
-        finally:
-            await context.close()
-            await browser.close()
+    except Exception as exc:
+        return RefreshResult.failed(f"flipkart_refresh_error: {exc}")

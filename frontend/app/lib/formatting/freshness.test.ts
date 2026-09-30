@@ -4,11 +4,11 @@ import { formatRelativeTime, freshnessFrom } from "~/lib/formatting/freshness";
 describe("freshness labels", () => {
   afterEach(() => vi.useRealTimers());
 
-  it("labels recent checks without claiming guaranteed live data", () => {
+  it("labels recent checks without claiming live verification", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-18T12:00:00Z"));
     expect(freshnessFrom("2026-07-18T11:55:00Z")).toEqual({
-      label: "Verified recently",
+      label: "Checked recently",
       tone: "success",
     });
   });
@@ -29,8 +29,8 @@ describe("freshness labels", () => {
   });
 
   it("handles missing and invalid timestamps", () => {
-    expect(freshnessFrom(null).label).toBe("Verification unavailable");
-    expect(freshnessFrom("not-a-date").label).toBe("Verification unavailable");
+    expect(freshnessFrom(null).label).toBe("Freshness unavailable");
+    expect(freshnessFrom("not-a-date").label).toBe("Freshness unavailable");
     expect(formatRelativeTime("not-a-date")).toBeNull();
   });
 });

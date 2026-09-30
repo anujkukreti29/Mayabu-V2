@@ -4,11 +4,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import async_playwright
-
+from mayabu_refresh.browser_pool import get_refresh_browser_pool, wait_for_price_or_stock
 from mayabu_refresh.common import (
-    detect_stock_status,
     calculate_discount_percent,
+    classify_and_apply_stock,
     clean_price_to_int,
     close_common_popups,
     extract_first_price_text,
@@ -320,73 +319,22 @@ def _sane_mrp(current_price: int | None, mrp: int | None) -> bool:
     return True
 
 
-async def _install_croma_stealth(context: Any) -> None:
-    await context.add_init_script(
-        """
-        (() => {
-            try {
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-            } catch (e) {}
-
-            try {
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-IN', 'en-US', 'en']
-                });
-            } catch (e) {}
-
-            try {
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5]
-                });
-            } catch (e) {}
-
-            try {
-                window.chrome = window.chrome || {};
-                window.chrome.runtime = window.chrome.runtime || {};
-            } catch (e) {}
-
-            try {
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications'
-                        ? Promise.resolve({ state: Notification.permission })
-                        : originalQuery(parameters)
-                );
-            } catch (e) {}
-        })();
-        """
-    )
-
-
 async def _wait_for_croma_price_render(page: Any) -> None:
-    price_patterns = [
-        "₹",
-        "MRP",
-        "Incl. all Taxes",
-        "EMI Options",
-        "Save",
-    ]
-
-    for _ in range(10):
+    price_patterns = ["₹", "MRP", "Incl. all Taxes", "EMI Options", "Save"]
+    for _ in range(5):
         try:
-            body_text = await page.locator("body").inner_text(timeout=2500)
+            body_text = await page.locator("body").inner_text(timeout=1500)
         except Exception:
             body_text = ""
-
         body_lc = body_text.lower()
         matched = sum(1 for pattern in price_patterns if pattern.lower() in body_lc)
-
         if matched >= 2 and "₹" in body_text:
             return
-
         try:
-            await page.mouse.wheel(0, 500)
+            await page.mouse.wheel(0, 400)
         except Exception:
             pass
-
-        await page.wait_for_timeout(1200)
+        await page.wait_for_timeout(400)
 
 
 async def _close_croma_location_modal(page: Any) -> None:
@@ -406,7 +354,7 @@ async def _close_croma_location_modal(page: Any) -> None:
                 continue
 
             await el.click(timeout=1500)
-            await page.wait_for_timeout(800)
+            await page.wait_for_timeout(300)
             return
 
         except Exception:
@@ -420,83 +368,61 @@ async def scrape_croma_refresh(
     debug: bool = False,
     artifact_dir: str | Path | None = None,
 ) -> RefreshResult:
-    async with async_playwright() as p:
-        try:
-            browser = await p.chromium.launch(
-                channel="chrome",
-                headless=headless,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                    "--window-size=1366,768",
-                ],
-            )
-        except Exception:
-            browser = await p.chromium.launch(
-                headless=headless,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                    "--window-size=1366,768",
-                ],
-            )
+    """Croma price refresh via shared browser pool (isolated context per task)."""
+    pool = get_refresh_browser_pool()
+    try:
+        async with pool.page(headless=headless, default_timeout_ms=15_000) as page:
+            await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
 
-        context = await browser.new_context(
-            user_agent=CROMA_HEADLESS_USER_AGENT,
-            viewport={"width": 1366, "height": 768},
-            device_scale_factor=1,
-            is_mobile=False,
-            has_touch=False,
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-            extra_http_headers={
-                "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
-                "Upgrade-Insecure-Requests": "1",
-            },
-        )
-
-        await _install_croma_stealth(context)
-
-        page = await context.new_page()
-        page.set_default_timeout(20000)
-
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=65000)
-            await page.wait_for_timeout(2500)
-
-            await close_common_popups(page)
-            await _close_croma_location_modal(page)
-
+            # Early challenge detection — fail safe before heavy waits / retries.
             try:
-                await page.mouse.move(420, 320)
-                await page.wait_for_timeout(500)
+                early_html = (await page.content()).lower()
+            except Exception:
+                early_html = ""
+            early_title = ""
+            try:
+                early_title = (await page.title() or "").lower()
             except Exception:
                 pass
-
-            try:
-                await page.evaluate("window.scrollTo(0, 240)")
-                await page.wait_for_timeout(1200)
-            except Exception:
-                pass
-
-            await _wait_for_croma_price_render(page)
-
-            html = await page.content()
-            html_lc = html.lower()
-
             blocked_terms = [
                 "captcha",
                 "access denied",
                 "verify you are human",
                 "unusual traffic",
                 "are you a human",
+                "attention required",
+                "cf-challenge",
+                "px-captcha",
+                "bot detection",
             ]
+            if any(term in early_html or term in early_title for term in blocked_terms):
+                await maybe_save_debug(
+                    page,
+                    prefix="croma_blocked_early",
+                    debug=debug,
+                    artifact_dir=artifact_dir,
+                )
+                return RefreshResult.failed("croma_blocked_or_captcha", "captcha")
+
+            await close_common_popups(page)
+            await _close_croma_location_modal(page)
+            await wait_for_price_or_stock(
+                page,
+                price_selectors=[
+                    "meta[property='product:price:amount']",
+                    "[itemprop='price']",
+                    "span:has-text('₹')",
+                ],
+                timeout_ms=5_000,
+            )
+            try:
+                await page.evaluate("window.scrollTo(0, 240)")
+            except Exception:
+                pass
+            await _wait_for_croma_price_render(page)
+
+            html = await page.content()
+            html_lc = html.lower()
 
             if any(term in html_lc for term in blocked_terms):
                 await maybe_save_debug(
@@ -507,14 +433,11 @@ async def scrape_croma_refresh(
                 )
                 return RefreshResult.failed("croma_blocked_or_captcha", "captcha")
 
-            # Most reliable for headless Croma.
             initial_current, initial_mrp = _extract_initial_data_prices(html)
-
-            # Secondary fallback from schema.org JSON-LD.
             ld_current = _extract_ld_json_price(html)
 
             try:
-                body_text = await page.locator("body").inner_text(timeout=8000)
+                body_text = await page.locator("body").inner_text(timeout=5000)
             except Exception:
                 body_text = ""
 
@@ -531,7 +454,6 @@ async def scrape_croma_refresh(
             )
 
             mrp: int | None = None
-
             for candidate in [initial_mrp, text_mrp, html_mrp, dom_mrp]:
                 if _sane_mrp(current_price, candidate):
                     mrp = candidate
@@ -539,20 +461,13 @@ async def scrape_croma_refresh(
 
             if current_price is None or mrp is None:
                 fallback = await extract_price_refresh_by_visible_text(page)
-
                 if current_price is None:
                     current_price = fallback.current_price
-
                 if mrp is None and _sane_mrp(current_price, fallback.mrp):
                     mrp = fallback.mrp
 
             calculated_discount = calculate_discount_percent(current_price, mrp)
-
-            # Accuracy rule:
-            # If MRP exists, calculate from current price + MRP.
-            # If MRP is missing, never trust random bank-offer percentage.
             discount = calculated_discount
-
             if discount is None and mrp is not None:
                 discount = text_discount or html_discount
 
@@ -560,12 +475,9 @@ async def scrape_croma_refresh(
                 current_price=current_price,
                 mrp=mrp,
                 discount_percent=discount,
-                raw_price_text=str(current_price)
-                if current_price is not None
-                else None,
+                raw_price_text=str(current_price) if current_price is not None else None,
                 raw_mrp_text=str(mrp) if mrp is not None else None,
             )
-
             if mrp is None:
                 result.discount_percent = None
                 result.warnings.append("missing_or_unsane_mrp")
@@ -576,19 +488,13 @@ async def scrape_croma_refresh(
                 debug=debug,
                 artifact_dir=artifact_dir,
             )
-
-            result.stock_status = detect_stock_status(html_lc)  # type: ignore[assignment]
+            classify_and_apply_stock(result, html_lc, scoped=False)
             return result
+    except Exception as exc:
+        return RefreshResult.failed(f"croma_refresh_error: {exc}")
 
-        except Exception as exc:
-            await maybe_save_debug(
-                page,
-                prefix="croma_error",
-                debug=debug,
-                artifact_dir=artifact_dir,
-            )
-            return RefreshResult.failed(f"croma_refresh_error: {exc}")
 
-        finally:
-            await context.close()
-            await browser.close()
+# Keep stealth helper for optional diagnostics; not used on the default pool path.
+async def _install_croma_stealth(context: Any) -> None:
+    del context
+    return

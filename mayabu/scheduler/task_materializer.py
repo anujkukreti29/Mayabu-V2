@@ -11,43 +11,67 @@ from mayabu.scheduler.platform_health_policy import platform_allows_task
 from mayabu.scheduler.refresh_policy import due_refresh_candidates
 from mayabu_db.tasks import create_task
 
-PLATFORMS = ["amazon", "flipkart", "croma", "reliancedigital"]
-
 
 def materialize_refresh(limit: int = 100, platform: str | None = None) -> int:
+    from mayabu.platforms.coverage import public_offer_allowed, task_allowed
+    from mayabu.scheduler.refresh_policy import refresh_task_priority
+
     rows = due_refresh_candidates(limit=limit, platform=platform)
     created = 0
     with db_connection() as conn:
         for row in rows:
             plat = row["platform"]
+            category = row.get("category")
             ensure_today_budget(plat)
+            if category and not task_allowed(plat, category, "refresh_listing"):
+                continue
+            if category and not public_offer_allowed(plat, category):
+                # Refresh only production-enabled category listings at scale.
+                continue
             if not platform_allows_task(plat, "refresh_listing") or not budget_available(plat, "refresh_listing"):
                 continue
+            listing_id = str(row["id"])
             create_task(
                 conn,
                 plat,
                 "refresh_listing",
                 url=row["listing_url"],
                 native_id=row.get("native_id"),
-                priority=int(row.get("refresh_priority") or 100),
+                priority=refresh_task_priority(row),
                 metadata={
-                    "source": "refresh_policy_v4",
-                    "platform_listing_id": str(row["id"]),
-                    "listing_id": row["listing_id"],
+                    "source": "refresh_policy_v5",
+                    "task_source": "scheduler_refresh",
+                    "platform_listing_id": listing_id,
+                    "listing_id": row.get("listing_id"),
                     "product_id": str(row["product_id"]) if row.get("product_id") else None,
+                    "category": category,
+                    "refresh_tier": row.get("refresh_tier") or "normal",
+                    "match_status": row.get("match_status"),
                 },
+                idempotency_key=f"refresh_listing:{listing_id}",
+                created_by="scheduler",
             )
             created += 1
     return created
 
 
 def materialize_demand_discovery(limit: int = 25, min_score: float = 70.0) -> int:
+    from mayabu.domain.categories.registry import detect_category_result
+    from mayabu.platforms.coverage import discovery_allowed, production_discovery_pairs
+
     clusters = list_promotable_demand(limit=limit, min_score=min_score)
+    pairs = production_discovery_pairs()
     created = 0
     with db_connection() as conn:
         for cluster in clusters:
             query = cluster["canonical_query"].replace("|", " ")
-            for plat in PLATFORMS:
+            det = detect_category_result(title=query, query=query)
+            category = det.category if det.category not in {"unknown", "accessory"} else None
+            for plat, cat in pairs:
+                if category and cat != category:
+                    continue
+                if not discovery_allowed(plat, cat):
+                    continue
                 ensure_today_budget(plat)
                 if not platform_allows_task(plat, "discovery") or not budget_available(plat, "discovery"):
                     continue
@@ -59,12 +83,29 @@ def materialize_demand_discovery(limit: int = 25, min_score: float = 70.0) -> in
                     priority=max(10, 100 - int(cluster.get("priority_score") or 0)),
                     max_pages=1,
                     max_products=30,
-                    metadata={"source": "demand_cluster", "demand_cluster_id": str(cluster["id"])},
+                    metadata={
+                        "source": "demand_cluster",
+                        "task_source": "demand_discovery",
+                        "demand_cluster_id": str(cluster["id"]),
+                        "category": cat,
+                    },
                 )
                 created += 1
             with conn.cursor() as cur:
                 cur.execute("update query_demand_clusters set last_promoted_at = now() where id = %s", (cluster["id"],))
     return created
+
+
+def materialize_enrichment_tasks(limit: int = 20) -> int:
+    from mayabu.catalog.enrichment import materialize_enrichment
+
+    return materialize_enrichment(limit=limit)
+
+
+def materialize_overlap_discovery(limit: int = 16) -> int:
+    from mayabu.catalog.overlap import materialize_targeted_discovery
+
+    return materialize_targeted_discovery(limit=limit)
 
 
 def main() -> None:

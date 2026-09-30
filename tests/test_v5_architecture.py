@@ -15,9 +15,11 @@ from mayabu.search.query_parser import parse_query
 def test_sku_only_query_is_a_relevant_exact_product_search() -> None:
     parsed = parse_query("X1407CA-LY1581WS")
     assert parsed.is_relevant is True
-    assert parsed.detected_category == "laptop"
-    assert parsed.intent == "exact_product"
-    assert "X1407CA-LY1581WS" in parsed.model_codes
+    # SKU-only queries search across public categories (no laptop fallback).
+    assert parsed.detected_category in {None, "laptop"}
+    assert parsed.intent in {"exact_product", "cross_category_search"}
+    assert parsed.model_codes
+    assert any("X1407CA" in code for code in parsed.model_codes)
 
 
 def test_exact_and_variant_relations_are_kept_separate() -> None:

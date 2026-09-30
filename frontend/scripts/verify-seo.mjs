@@ -1,12 +1,10 @@
 import { readFile } from "node:fs/promises";
 
 const pages = [
-  ["build/client/index.html", "Find the best place to buy electronics in India"],
-  ["build/client/about/index.html", "About Mayabu"],
+  ["build/client/index.html", "Compare prices. Track drops. Know when to buy."],
+  ["build/client/about/index.html", "Better product decisions start with clearer evidence."],
   ["build/client/platforms/index.html", "Supported ecommerce platforms"],
-  ["build/client/how-it-works/index.html", "How Mayabu helps you compare before buying"],
-  ["build/client/laptops/index.html", "Compare laptops by exact model"],
-  ["build/client/mobile-phones/index.html", "Compare mobile phones by exact variant"],
+  ["build/client/how-it-works/index.html", "From search to a price you can trust."],
 ];
 for (const [file, heading] of pages) {
   const html = await readFile(file, "utf8");

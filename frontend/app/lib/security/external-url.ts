@@ -7,6 +7,14 @@ const APPROVED_RETAILERS = [
   "www.croma.com",
   "reliancedigital.in",
   "www.reliancedigital.in",
+  "vijaysales.com",
+  "www.vijaysales.com",
+  "jiomart.com",
+  "www.jiomart.com",
+  "poorvika.com",
+  "www.poorvika.com",
+  "bajajelectronics.com",
+  "www.bajajelectronics.com",
 ];
 
 export function safeRetailerUrl(value: string | null | undefined): string | null {

@@ -18,11 +18,13 @@ class DetailProduct:
     mrp: float | None = None
     currency: str = "INR"
     image_url: str | None = None
+    image_urls: list[str] = field(default_factory=list)
     availability: str | None = None
     seller_name: str | None = None
     rating: float | None = None
     review_count: int | None = None
     specs: dict[str, Any] = field(default_factory=dict)
+    highlights: list[str] = field(default_factory=list)
     status: DetailStatus = "failed"
     warnings: list[str] = field(default_factory=list)
     scraped_at: str = field(default_factory=lambda: datetime.now(timezone.utc).replace(microsecond=0).isoformat())
@@ -31,10 +33,24 @@ class DetailProduct:
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def gallery_urls(self) -> list[str]:
+        urls: list[str] = []
+        seen: set[str] = set()
+        for raw in ([self.image_url] if self.image_url else []) + list(self.image_urls or []):
+            value = str(raw or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            urls.append(value)
+            if len(urls) >= 10:
+                break
+        return urls
+
     def to_raw_listing(self, query: str | None = None) -> dict[str, Any]:
         discount = None
         if self.current_price and self.mrp and self.mrp > self.current_price:
             discount = round((1 - self.current_price / self.mrp) * 100, 2)
+        gallery = self.gallery_urls()
         return {
             "platform": self.platform,
             "source": self.platform,
@@ -48,10 +64,12 @@ class DetailProduct:
             "mrp": self.mrp,
             "discount_pct": discount,
             "currency": self.currency,
-            "image": self.image_url,
+            "image": gallery[0] if gallery else self.image_url,
+            "images": gallery,
             "seller_name": self.seller_name,
             "stock_status": self.availability,
             "specs": self.specs,
+            "highlights": self.highlights,
             "scraped_at": self.scraped_at,
             "detail_evidence": self.evidence,
         }

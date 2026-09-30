@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from mayabu.core import distributed_limit
 from mayabu.search import search_repository
 
@@ -45,7 +47,11 @@ def test_distributed_slot_acquires_shared_key_and_releases(monkeypatch):
     monkeypatch.setattr(
         distributed_limit,
         "get_app_settings",
-        lambda: SimpleNamespace(redis_url="redis://test", environment="production"),
+        lambda: SimpleNamespace(
+            redis_url="redis://test",
+            environment="production",
+            redis_key_prefix="production",
+        ),
     )
 
     async def run():
@@ -61,7 +67,66 @@ def test_distributed_slot_acquires_shared_key_and_releases(monkeypatch):
 
     asyncio.run(run())
     assert cache.client.released
-    assert cache.client.released[0][0] == "mayabu:slots:scrape-platform:amazon"
+    assert cache.client.released[0][0] == "mayabu:production:slots:scrape-platform:amazon"
+
+
+def test_distributed_slot_enforces_shared_cap_across_concurrent_holders(monkeypatch):
+    """Two concurrent holders with limit=1: second must fail to acquire."""
+
+    class CountingRedis(FakeRedis):
+        def eval(self, script, key_count, key, *args):
+            assert key_count == 1
+            if "ZREMRANGEBYSCORE" in script:
+                now = float(args[0])
+                # Drop expired (scores are expiry timestamps in FakeRedis tokens map
+                # we store only active tokens without scores — approximate with set size).
+                token = str(args[3])
+                limit = int(args[2])
+                if len(self.tokens) >= limit:
+                    return 0
+                self.tokens.add(token)
+                return 1
+            token = str(args[0])
+            return 1 if token in self.tokens else 0
+
+    cache = FakeCache()
+    cache.client = CountingRedis()
+    monkeypatch.setattr(
+        distributed_limit,
+        "get_app_settings",
+        lambda: SimpleNamespace(
+            redis_url="redis://test",
+            environment="production",
+            redis_key_prefix="production",
+        ),
+    )
+
+    async def run():
+        async with distributed_limit.distributed_slot(
+            "scrape-platform",
+            "amazon",
+            1,
+            ttl_seconds=30,
+            wait_seconds=0.2,
+            cache=cache,
+        ):
+            assert len(cache.client.tokens) == 1
+
+            async def second_holder() -> None:
+                async with distributed_limit.distributed_slot(
+                    "scrape-platform",
+                    "amazon",
+                    1,
+                    ttl_seconds=30,
+                    wait_seconds=0.2,
+                    cache=cache,
+                ):
+                    return None
+
+            with pytest.raises(distributed_limit.DistributedCapacityError):
+                await second_holder()
+
+    asyncio.run(run())
 
 
 def test_all_network_scrape_paths_use_the_shared_capacity_gate():

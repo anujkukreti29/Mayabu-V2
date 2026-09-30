@@ -7,12 +7,18 @@ from psycopg import sql
 from mayabu.db.connection import db_connection
 from mayabu_common import canonical_platform
 
+# Conservative defaults for new retailers; Flipkart keeps a slightly higher budget.
 DEFAULT_DAILY_BUDGETS = {
     "amazon": {"discovery": 100, "refresh": 500},
     "flipkart": {"discovery": 150, "refresh": 800},
     "croma": {"discovery": 100, "refresh": 300},
     "reliancedigital": {"discovery": 100, "refresh": 500},
+    "vijaysales": {"discovery": 60, "refresh": 200},
+    "jiomart": {"discovery": 60, "refresh": 200},
+    "poorvika": {"discovery": 60, "refresh": 200},
+    "bajajelectronics": {"discovery": 60, "refresh": 200},
 }
+_DEFAULT_BUDGET = {"discovery": 60, "refresh": 200}
 
 _BUDGET_COLUMNS = {
     "discovery": ("discovery_used", "discovery_budget"),
@@ -27,7 +33,7 @@ def _budget_columns(task_type: str) -> tuple[str, str]:
 
 def ensure_today_budget(platform: str) -> None:
     platform = canonical_platform(platform)
-    budget = DEFAULT_DAILY_BUDGETS[platform]
+    budget = DEFAULT_DAILY_BUDGETS.get(platform, _DEFAULT_BUDGET)
     with db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(

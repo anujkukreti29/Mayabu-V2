@@ -1,11 +1,9 @@
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useState } from "react";
-import { useForm } from "react-hook-form";
+import { HelpCircle, Mail, MessageSquareWarning, Shield } from "lucide-react";
 import type { MetaFunction } from "react-router";
-import { z } from "zod";
-import { Button } from "~/components/ui/button";
-import { Card } from "~/components/ui/card";
+import { Link } from "react-router";
+import { Reveal } from "~/components/ui/reveal";
 import { pageMeta } from "~/lib/seo/metadata";
+import { routes } from "~/lib/navigation/routes";
 
 export const meta: MetaFunction = () =>
   pageMeta({
@@ -15,117 +13,90 @@ export const meta: MetaFunction = () =>
     path: "/contact",
   });
 
-const formSchema = z.object({
-  name: z.string().trim().min(2, "Enter your name.").max(80),
-  email: z.string().trim().email("Enter a valid email address.").max(160),
-  topic: z.string().min(1, "Choose a topic."),
-  productUrl: z.string().trim().url("Enter a valid URL.").or(z.literal("")),
-  message: z.string().trim().min(20, "Add at least 20 characters.").max(3000),
-});
-type ContactValues = z.infer<typeof formSchema>;
+const TOPICS = [
+  {
+    icon: MessageSquareWarning,
+    title: "Product or price data",
+    copy: "Incorrect matches, missing listings, or freshness issues on a product page.",
+  },
+  {
+    icon: Shield,
+    title: "Privacy requests",
+    copy: "Questions about account data, cookies, or how Mayabu handles personal information.",
+  },
+  {
+    icon: HelpCircle,
+    title: "General feedback",
+    copy: "Ideas that would make comparison clearer—without inventing features Mayabu cannot support yet.",
+  },
+] as const;
 
 export default function Contact() {
-  const [unavailable, setUnavailable] = useState(false);
-  const {
-    register,
-    handleSubmit,
-    formState: { errors, isSubmitting },
-  } = useForm<ContactValues>({
-    resolver: zodResolver(formSchema),
-    defaultValues: { name: "", email: "", topic: "", productUrl: "", message: "" },
-  });
-  const submit = handleSubmit(() => {
-    setUnavailable(true);
-  });
-  const fieldClass =
-    "mt-2 min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm";
   return (
-    <main id="main-content" className="page-container py-12">
-      <div className="max-w-3xl">
-        <p className="eyebrow">Support and feedback</p>
-        <h1 className="mt-2 text-4xl font-black">Contact Mayabu</h1>
-        <p className="mt-4 text-lg leading-8 text-slate-600">
-          Send feedback, report a product-data problem, or ask about Mayabu. Do not include
-          passwords, payment information, or sensitive account details.
-        </p>
-      </div>
-      <Card className="mt-8 max-w-3xl p-6 sm:p-8">
-        <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
-          <strong>Support submission is not connected yet.</strong> This form validates the
-          information locally, but Mayabu will not claim that a message was recorded until a real
-          backend contact endpoint exists.
+    <main id="main-content">
+      <section className="border-b border-line marketing-atmosphere">
+        <div className="reading-container py-12 sm:py-16">
+          <p className="eyebrow">Support</p>
+          <h1 className="mt-3 page-title">Contact Mayabu</h1>
+          <p className="mt-4 max-w-xl text-body-lg text-ink-muted">
+            Reach out about product-data problems, privacy, or feedback. Do not include passwords,
+            payment details, or sensitive account credentials.
+          </p>
         </div>
-        <form onSubmit={(event) => void submit(event)} noValidate className="grid gap-5">
-          <label className="text-sm font-bold">
-            Name
-            <input {...register("name")} className={fieldClass} autoComplete="name" />
-            {errors.name ? (
-              <span className="mt-1 block text-xs text-red-700">{errors.name.message}</span>
-            ) : null}
-          </label>
-          <label className="text-sm font-bold">
-            Email address
-            <input
-              {...register("email")}
-              type="email"
-              className={fieldClass}
-              autoComplete="email"
-            />
-            {errors.email ? (
-              <span className="mt-1 block text-xs text-red-700">{errors.email.message}</span>
-            ) : null}
-          </label>
-          <label className="text-sm font-bold">
-            Topic
-            <select {...register("topic")} className={fieldClass}>
-              <option value="">Choose a topic</option>
-              <option>Incorrect product match</option>
-              <option>Incorrect price or availability</option>
-              <option>Missing product</option>
-              <option>Retailer or partnership enquiry</option>
-              <option>Privacy request</option>
-              <option>General feedback</option>
-            </select>
-            {errors.topic ? (
-              <span className="mt-1 block text-xs text-red-700">{errors.topic.message}</span>
-            ) : null}
-          </label>
-          <label className="text-sm font-bold">
-            Product URL or Mayabu page{" "}
-            <span className="font-normal text-slate-500">(optional)</span>
-            <input
-              {...register("productUrl")}
-              type="url"
-              className={fieldClass}
-              placeholder="https://"
-            />
-            {errors.productUrl ? (
-              <span className="mt-1 block text-xs text-red-700">{errors.productUrl.message}</span>
-            ) : null}
-          </label>
-          <label className="text-sm font-bold">
-            Message
-            <textarea {...register("message")} className={`${fieldClass} min-h-40 resize-y`} />
-            {errors.message ? (
-              <span className="mt-1 block text-xs text-red-700">{errors.message.message}</span>
-            ) : null}
-          </label>
-          <div>
-            <Button type="submit" disabled={isSubmitting}>
-              Send message
-            </Button>
+      </section>
+
+      <section className="section-space">
+        <div className="page-container grid gap-8 lg:grid-cols-[1.1fr_0.9fr] lg:gap-12">
+          <div className="space-y-4">
+            {TOPICS.map((topic, i) => {
+              const Icon = topic.icon;
+              return (
+                <Reveal key={topic.title} delayMs={i * 40} className="surface p-5 sm:p-6">
+                  <div className="flex gap-4">
+                    <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-accent-soft text-accent">
+                      <Icon className="h-5 w-5" aria-hidden="true" />
+                    </span>
+                    <div>
+                      <h2 className="text-title-sm text-ink">{topic.title}</h2>
+                      <p className="mt-1.5 text-sm leading-6 text-ink-muted">{topic.copy}</p>
+                    </div>
+                  </div>
+                </Reveal>
+              );
+            })}
           </div>
-          {unavailable ? (
-            <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4">
-              <h2 className="font-black text-red-800">Message could not be sent</h2>
-              <p className="mt-1 text-sm text-red-700">
-                The Mayabu support endpoint is not available in the current backend. Your message
-                was not transmitted or recorded.
-              </p>
+
+          <Reveal className="surface-elevated h-fit p-6 sm:p-8">
+            <Mail className="h-6 w-6 text-accent" aria-hidden="true" />
+            <h2 className="mt-4 text-title-sm text-ink">Contact channel status</h2>
+            <p className="mt-2 text-sm leading-6 text-ink-muted">
+              A live support form and public support inbox are not connected in this release. Until a
+              backend contact endpoint and verified mailbox are available, Mayabu will not claim that
+              messages can be received through this page.
+            </p>
+            <p className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm leading-6 text-amber-950">
+              For privacy-related requests, see the{" "}
+              <Link to={routes.privacy} className="font-semibold underline-offset-2 hover:underline">
+                Privacy
+              </Link>{" "}
+              page for the current policy contact guidance.
+            </p>
+            <p className="mt-4 text-xs leading-5 text-ink-faint">
+              We do not promise 24/7 or one-hour responses.
+            </p>
+            <div className="mt-6 border-t border-line pt-5 text-sm text-ink-muted">
+              Useful links:{" "}
+              <Link to={routes.howItWorks} className="font-medium text-accent hover:text-accent-strong">
+                How it works
+              </Link>
+              {" · "}
+              <Link to={routes.about} className="font-medium text-accent hover:text-accent-strong">
+                About
+              </Link>
             </div>
-          ) : null}
-        </form>
-      </Card>
+          </Reveal>
+        </div>
+      </section>
     </main>
   );
 }

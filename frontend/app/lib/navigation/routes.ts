@@ -1,9 +1,21 @@
+import { CATEGORY_ROUTE_BY_SLUG } from "~/lib/category/landing-registry";
+import { PUBLIC_CATEGORY_SLUGS, categoryDisplayName } from "~/lib/search/categories";
+
 export const routes = Object.freeze({
   home: "/",
   search: "/search",
-  laptops: "/laptops",
-  mobilePhones: "/mobile-phones",
+  laptops: CATEGORY_ROUTE_BY_SLUG.laptop,
+  smartphones: CATEGORY_ROUTE_BY_SLUG.smartphone,
+  televisions: CATEGORY_ROUTE_BY_SLUG.television,
+  refrigerators: CATEGORY_ROUTE_BY_SLUG.refrigerator,
+  washingMachines: CATEGORY_ROUTE_BY_SLUG.washing_machine,
+  tws: CATEGORY_ROUTE_BY_SLUG.tws,
+  headphones: CATEGORY_ROUTE_BY_SLUG.headphones,
+  cameras: CATEGORY_ROUTE_BY_SLUG.camera,
+  /** @deprecated Use smartphones — kept for legacy imports. */
+  mobilePhones: CATEGORY_ROUTE_BY_SLUG.smartphone,
   compare: "/compare",
+  wishlist: "/wishlist",
   deals: "/deals",
   tracker: "/tracker",
   platforms: "/platforms",
@@ -14,10 +26,14 @@ export const routes = Object.freeze({
   terms: "/terms",
   disclaimer: "/disclaimer",
   assistant: "/assistant",
-  login: "/login",
+  login: "/sign-in",
   signup: "/signup",
+  checkEmail: "/check-email",
   account: "/account",
   admin: "/admin",
+  verifyEmail: "/verify-email",
+  forgotPassword: "/forgot-password",
+  resetPassword: "/reset-password",
 } as const);
 
 export interface NavigationFeatures {
@@ -30,21 +46,19 @@ export interface NavigationLink {
   label: string;
 }
 
-export const categoryLinks: readonly NavigationLink[] = [
-  { to: routes.laptops, label: "Laptops" },
-  { to: routes.mobilePhones, label: "Mobile Phones" },
-];
+export const categoryLinks: readonly NavigationLink[] = PUBLIC_CATEGORY_SLUGS.map((slug) => ({
+  to: CATEGORY_ROUTE_BY_SLUG[slug],
+  label: categoryDisplayName(slug),
+}));
 
-export const futureCategories = ["Earbuds & Headphones", "Smartwatches", "Tablets"] as const;
+export const futureCategories = [] as const;
 
-export function primaryNavigation(features: NavigationFeatures): NavigationLink[] {
+/** Desktop primary nav — compact and truthful. */
+export function primaryNavigation(_features?: NavigationFeatures): NavigationLink[] {
+  void _features;
   return [
     { to: routes.compare, label: "Compare" },
-    ...(features.deals ? [{ to: routes.deals, label: "Deals" }] : []),
-    ...(features.tracker ? [{ to: routes.tracker, label: "Price Tracker" }] : []),
-    { to: routes.platforms, label: "Supported Platforms" },
     { to: routes.howItWorks, label: "How It Works" },
-    { to: routes.about, label: "About" },
   ];
 }
 
@@ -89,8 +103,7 @@ export function footerNavigation(features: NavigationFeatures) {
 
 export const staticIndexablePaths = [
   routes.home,
-  routes.laptops,
-  routes.mobilePhones,
+  ...PUBLIC_CATEGORY_SLUGS.map((slug) => CATEGORY_ROUTE_BY_SLUG[slug]),
   routes.platforms,
   routes.howItWorks,
   routes.about,

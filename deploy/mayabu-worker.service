@@ -1,0 +1,31 @@
+[Unit]
+Description=Mayabu scrape/verification worker
+Documentation=https://github.com/mayabu/mayabu
+After=network-online.target postgresql.service redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mayabu
+Group=mayabu
+WorkingDirectory=/opt/mayabu/current
+EnvironmentFile=-/etc/mayabu/mayabu.env
+ExecStart=/opt/mayabu/current/.venv/bin/python worker_db.py --loop --concurrency 2
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+KillSignal=SIGTERM
+# Structured logs → journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mayabu-worker
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mayabu/current/artifacts /opt/mayabu/current/logs /var/lib/mayabu
+
+[Install]
+WantedBy=multi-user.target

@@ -28,6 +28,8 @@ class RefreshResult:
     currency: str = "INR"
     stock_status: StockStatus = "unknown"
     stock_text: str | None = None
+    stock_reason: str | None = None
+    stock_confidence: str | None = None
     page_status: PageStatus = "unknown"
     warnings: list[str] = field(default_factory=list)
     raw_price_text: str | None = None

@@ -17,6 +17,9 @@ except Exception:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+# Keep in sync with mayabu.search.category_registry.SEARCH_CONTRACT_VERSION
+_SEARCH_CACHE_PREFIX = "search:v6:"
+
 
 class Cache:
     def __init__(self) -> None:
@@ -116,17 +119,22 @@ class Cache:
     def invalidate_product(self, product_id: str) -> int:
         """Invalidate only strongly product-scoped data.
 
-        Search responses are intentionally eventually consistent and expire via
-        their short TTL. Clearing every search key for every price refresh turns
-        Redis into a permanent miss cache under normal worker load.
+        Search and suggest responses are intentionally eventually consistent and
+        expire via short TTL (suggest ≤30s). Clearing every search/suggest key for
+        every price refresh turns Redis into a permanent miss cache under normal
+        worker load. Maximum documented suggest staleness after a material price
+        change is therefore the suggest TTL.
         """
         total = self.delete_prefix(f"product:{product_id}:")
         total += self.delete_prefix(f"price-history:{product_id}:")
+        total += self.delete_prefix(f"price-intelligence:{product_id}:")
         return total
 
     def invalidate_search(self) -> int:
         """Explicit bulk invalidation for migrations or manual catalog rebuilds."""
-        return self.delete_prefix("search:v5:")
+        total = self.delete_prefix(_SEARCH_CACHE_PREFIX)
+        total += self.delete_prefix("suggest:")
+        return total
 
 
 @lru_cache(maxsize=1)
